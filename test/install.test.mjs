@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shellQuote, hookCommand, codexHooksObject } from '../scripts/install.mjs';
+import { shellQuote, hookCommand, codexHooksObject, codexTomlBlock } from '../scripts/install.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INSTALL = path.join(REPO, 'scripts', 'install.mjs');
@@ -281,4 +281,13 @@ process.stdout.write(out);
     assert.equal(hookCommand('session-start', '/a b/janitor.mjs', false), 'node "/a b/janitor.mjs" --hook session-start');
   });
 
+  test('checked-in Codex templates match what the installer writes', () => {
+    const J = '/path/to/claude-worktree-janitor/scripts/janitor.mjs';
+    const I = '/path/to/claude-worktree-janitor/scripts/install.mjs';
+    const json = JSON.parse(read(path.join(REPO, 'integrations', 'codex', 'hooks.json')));
+    assert.deepEqual(json, { hooks: codexHooksObject(J, false) });
+    const toml = read(path.join(REPO, 'integrations', 'codex', 'config.toml'));
+    const block = ['# >>> worktree-janitor >>>', ...codexTomlBlock(J, false, I), '# <<< worktree-janitor <<<', ''].join('\n');
+    assert.ok(toml.endsWith(block), 'config.toml template ends with the installer block');
+  });
 });
