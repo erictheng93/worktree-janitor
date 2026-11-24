@@ -16,11 +16,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const IS_WIN = process.platform === 'win32';
+const IS_LINUX = process.platform === 'linux';
+const MOUNTINFO = '/proc/self/mountinfo';
 const HOOK_BUDGET_MS = 20_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const GIT_TIMEOUT_MS = 30_000;
 const GH_TIMEOUT_MS = 10_000;
-const LINK_SCAN_DEPTH = 6;
 const FIRST_PARENT_CAP = 50_000;
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop', 'trunk']);
 // `gh pr merge`, also as `gh.exe` (Windows) and anywhere inside a wrapper
@@ -242,33 +243,115 @@ function isLink(p, st) {
 
 const nsPath = (p) => (IS_WIN ? path.toNamespacedPath(path.resolve(p)) : p);
 
-// Walk `root` with lstat, never descending into links, skipping `.git`.
-// Returns every link (symlink / junction / reparse point) found.
-function scanLinks(root, maxDepth = LINK_SCAN_DEPTH) {
-  const links = [];
-  let truncated = false;
-  const stack = [[root, 0]];
+// ---------------------------------------------------------------- mount points
+//
+// A mount inside a worktree (a bind mount, a tmpfs, a mounted volume) holds
+// data that does not belong to the worktree. Recursive deletion crosses into
+// it: `git worktree remove` empties the mounted source and only then fails
+// with "Device or resource busy" on the mount point itself. So any mount at or
+// below a worktree keeps that worktree; the janitor never unmounts anything.
+// Two independent detectors:
+//   - Linux: /proc/self/mountinfo lists every mount point, including bind
+//     mounts of the same filesystem, which st_dev cannot see.
+//   - every OS: a directory whose st_dev differs from the worktree root's is
+//     on another filesystem (see scanTree). On Windows a mounted volume is a
+//     reparse point that Node does not report as a link, so this is what
+//     catches it; junctions and symlinks are links and are only unlinked.
+
+// One /proc/self/mountinfo line:
+//   36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw
+// Field 5 is the mount point. The kernel writes space, tab, newline and
+// backslash in it as 3-digit octal escapes (\040 \011 \012 \134); every other
+// byte, including non-ASCII UTF-8, is written raw.
+export function parseMountinfo(text) {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    const f = line.split(' ');
+    if (f.length < 5 || !f[4].startsWith('/')) continue;
+    out.push(f[4].replace(/\\([0-3][0-7]{2})/g, (_, o) => String.fromCharCode(parseInt(o, 8))));
+  }
+  return out;
+}
+
+// Mount points equal to or below `root` (a realpath), from mountinfo text.
+export function mountPointsUnder(mountinfoText, root) {
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  return parseMountinfo(mountinfoText).filter((mp) => mp === root || mp.startsWith(prefix));
+}
+
+// -> { mounts: string[], error: string | null }. On Linux an unreadable or
+// empty mountinfo is an error: the caller must then keep the worktree.
+export function mountCheck(root, { platform = process.platform, read = () => fs.readFileSync(MOUNTINFO, 'utf8') } = {}) {
+  if (platform !== 'linux') return { mounts: [], error: null };
+  let text;
+  try {
+    text = read();
+  } catch (e) {
+    return { mounts: [], error: `cannot read ${MOUNTINFO} (${(e && e.code) || (e && e.message) || e})` };
+  }
+  if (!parseMountinfo(text).length) return { mounts: [], error: `${MOUNTINFO} lists no mounts` };
+  return { mounts: mountPointsUnder(text, root), error: null };
+}
+
+const mountReason = (mounts) => `contains mount point ${mounts[0]}${mounts.length > 1 ? ` (+${mounts.length - 1} more)` : ''}; unmount it first`;
+
+// Walk `root` with lstat to any depth, never descending into links, skipping
+// the worktree's own `.git`. Returns every link (symlink / junction / reparse
+// point), every directory on another device than `root` (not descended),
+// every directory that could not be read, and whether the time budget ran out.
+// `lstat` is injectable for tests.
+export function scanTree(root, { lstat = (p) => fs.lstatSync(p), deadline = () => remaining() } = {}) {
+  const res = { links: [], foreignDev: [], unreadable: [], timedOut: false };
+  let rootDev;
+  try {
+    rootDev = lstat(nsPath(root)).dev;
+  } catch {
+    res.unreadable.push(root);
+    return res;
+  }
+  const stack = [root];
+  let seen = 0;
   while (stack.length) {
-    const [dir, depth] = stack.pop();
+    const dir = stack.pop();
     let names;
     try {
       names = fs.readdirSync(nsPath(dir));
     } catch {
+      res.unreadable.push(dir);
       continue;
     }
     for (const name of names) {
-      if (name === '.git') continue;
+      if (dir === root && name === '.git') continue;
+      if (++seen % 2048 === 0 && deadline() <= 1000) {
+        res.timedOut = true;
+        return res;
+      }
       const p = path.join(dir, name);
-      const st = lstatOrNull(nsPath(p));
-      if (!st) continue;
-      if (isLink(nsPath(p), st)) links.push(p);
+      let st;
+      try {
+        st = lstat(nsPath(p));
+      } catch {
+        continue; // vanished
+      }
+      if (isLink(nsPath(p), st)) res.links.push(p);
       else if (st.isDirectory()) {
-        if (depth + 1 < maxDepth) stack.push([p, depth + 1]);
-        else truncated = true;
+        if (st.dev !== rootDev) res.foreignDev.push(p);
+        else stack.push(p);
       }
     }
   }
-  return { links, truncated };
+  return res;
+}
+
+// Why a worktree must be kept because of what is mounted in it (null = none).
+function mountKeepReason(wtPath, scan) {
+  const m = mountCheck(realish(wtPath));
+  if (m.error) return `${m.error}; cannot rule out mount points, not deleting`;
+  if (m.mounts.length) return mountReason(m.mounts);
+  if (scan.foreignDev.length) return mountReason(scan.foreignDev);
+  if (scan.unreadable.length) return `cannot read ${scan.unreadable[0]}; cannot rule out mount points, not deleting`;
+  if (scan.timedOut) return 'time budget exhausted while scanning for links and mount points';
+  return null;
 }
 
 // Remove ONE link without touching what it points to, then prove it.
@@ -564,7 +647,10 @@ function janitor(opts, ctx) {
     if (!verdict.merged) return wtReport(wt, 'kept', verdict.reason);
 
     const lockNote = wt.locked ? (staleLock ? '; stale Claude Code lock (pid not alive)' : '; lock overridden by --include-locked') : '';
-    const scan = scanLinks(wt.path);
+    // Mount detection comes before anything is deleted (dry run included).
+    const scan = scanTree(wt.path);
+    const mountKeep = mountKeepReason(wt.path, scan);
+    if (mountKeep) return wtReport(wt, 'kept', mountKeep);
     const linkNote = scan.links.length ? `; ${scan.links.length} link(s) to be unlinked first` : '';
     if (!opts.apply) return wtReport(wt, 'would-remove', verdict.reason + lockNote + linkNote);
 
@@ -633,8 +719,11 @@ function removeWorktree(repo, wt, scan) {
   // (a) Unlink every link inside the worktree BEFORE git touches it.
   // `git worktree remove` on Windows recurses THROUGH NTFS junctions (e.g. a
   // node_modules junction into the main checkout) and deletes their targets.
+  // Mounts again, right before touching anything: the scan may be seconds old.
+  const mountKeep = mountKeepReason(wt.path, scanTree(wt.path));
+  if (mountKeep) throw new Error(mountKeep);
   const removedLinks = scan.links.map((l) => removeLinkOnly(l));
-  const rescan = scanLinks(wt.path);
+  const rescan = scanTree(wt.path);
   if (rescan.links.length) throw new Error(`links remain after unlinking: ${rescan.links[0]}`);
 
   // If any removed link was a symlink tracked by git, the tree is now
@@ -654,9 +743,8 @@ function removeWorktree(repo, wt, scan) {
   }
 
   // (b) git worktree remove (no --force). Fall back to the link-safe deleter
-  // only for long-path failures (win32), links possibly below the scan depth, or
-  // tracked links we removed ourselves.
-  let useFallback = rescan.truncated || trackedLinkRemoved;
+  // only for long-path failures (win32) or tracked links we removed ourselves.
+  let useFallback = trackedLinkRemoved;
   if (!useFallback) {
     const r = git(['worktree', 'remove', wt.path], { cwd: repo });
     if (!r.ok) {
@@ -833,7 +921,10 @@ async function main(argv) {
   }
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  () => process.exit(process.argv.some((a) => a === '--hook' || a.startsWith('--hook=')) ? 0 : 1),
-);
+// Tests import this module for its pure helpers; they set this flag first.
+if (!globalThis.__WORKTREE_JANITOR_NO_MAIN__) {
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    () => process.exit(process.argv.some((a) => a === '--hook' || a.startsWith('--hook=')) ? 0 : 1),
+  );
+}

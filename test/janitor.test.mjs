@@ -2,7 +2,7 @@
 // Run: node --test test/janitor.test.mjs
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +10,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const IS_WIN = process.platform === 'win32';
 const JANITOR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'janitor.mjs');
+// The pure helpers, imported in-process without running the CLI.
+globalThis.__WORKTREE_JANITOR_NO_MAIN__ = true;
+const lib = await import(pathToFileURL(JANITOR).href);
 // Runtime that executes janitor.mjs (the test runner itself is always node).
 // JANITOR_RUNTIME=bun runs every janitor invocation under bun instead.
 const RUNTIME = process.env.JANITOR_RUNTIME || process.execPath;
@@ -618,5 +621,184 @@ describe('worktree-janitor', { concurrency: 6 }, () => {
     assert.equal(res.code, 0, res.stderr);
     assert.equal(wtEntry(res.json, wt).action, 'removed', wtEntry(res.json, wt).reason);
     assert.equal(fs.existsSync(wt), false);
+  });
+});
+
+// ---------------------------------------------------------------- mount points
+
+describe('mount detection helpers (no privileges needed)', () => {
+  const FIXTURE = [
+    '22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw',
+    '25 22 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw',
+    '40 22 8:1 /srv/precious /home/u/wt/node_modules rw,relatime shared:1 - ext4 /dev/sda1 rw',
+    '41 22 0:40 / /home/u/wt/my\\040cache rw - tmpfs tmpfs rw',
+    '42 22 0:41 / /home/u/wt/back\\134slash\\011tab rw - tmpfs tmpfs rw',
+    '43 22 0:42 / /home/u/wt2 rw - tmpfs tmpfs rw',
+    '44 22 0:43 / /home/u/wt/\u00fcber rw - tmpfs tmpfs rw',
+    '',
+  ].join('\n');
+
+  test('parseMountinfo returns field 5 with octal escapes decoded', () => {
+    assert.deepEqual(lib.parseMountinfo(FIXTURE), [
+      '/',
+      '/proc',
+      '/home/u/wt/node_modules',
+      '/home/u/wt/my cache',
+      '/home/u/wt/back\\slash\ttab',
+      '/home/u/wt2',
+      '/home/u/wt/\u00fcber',
+    ]);
+  });
+
+  test('mountPointsUnder matches the root and paths below it, not siblings sharing a prefix', () => {
+    assert.deepEqual(lib.mountPointsUnder(FIXTURE, '/home/u/wt'), [
+      '/home/u/wt/node_modules',
+      '/home/u/wt/my cache',
+      '/home/u/wt/back\\slash\ttab',
+      '/home/u/wt/\u00fcber',
+    ]);
+    assert.deepEqual(lib.mountPointsUnder(FIXTURE, '/home/u/wt2'), ['/home/u/wt2']);
+    assert.deepEqual(lib.mountPointsUnder(FIXTURE, '/home/u/w'), []);
+    assert.deepEqual(lib.mountPointsUnder('40 22 8:1 / /x/wt rw - ext4 /dev/sda1 rw\n', '/x/wt'), ['/x/wt']);
+  });
+
+  test('mountCheck fails closed on Linux when mountinfo is unreadable or empty; no-op elsewhere', () => {
+    const enoent = () => {
+      throw Object.assign(new Error('nope'), { code: 'ENOENT' });
+    };
+    assert.match(lib.mountCheck('/home/u/wt', { platform: 'linux', read: enoent }).error, /cannot read \/proc\/self\/mountinfo \(ENOENT\)/);
+    assert.match(lib.mountCheck('/home/u/wt', { platform: 'linux', read: () => '' }).error, /lists no mounts/);
+    assert.equal(lib.mountCheck('/home/u/wt', { platform: 'linux', read: () => FIXTURE }).mounts.length, 4);
+    assert.deepEqual(lib.mountCheck('/home/u/wt', { platform: 'darwin', read: enoent }), { mounts: [], error: null });
+    assert.deepEqual(lib.mountCheck('C:\\wt', { platform: 'win32', read: enoent }), { mounts: [], error: null });
+  });
+
+  test('scanTree reports a directory on another device at any depth and does not descend into it', async () => {
+    const root = path.join(ROOT, `scan-${++counter}`);
+    const deep = path.join(root, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'mnt');
+    fs.mkdirSync(path.join(deep, 'inner'), { recursive: true });
+    await dirLink(ROOT, path.join(deep, 'inner', 'link-below-mount'));
+    await dirLink(ROOT, path.join(root, 'a', 'b', 'link'));
+    fs.writeFileSync(path.join(root, '.git'), 'gitdir: nowhere\n');
+    const foreign = canon(deep);
+    const lstat = (p) => {
+      const st = fs.lstatSync(p);
+      if (canon(p) !== foreign) return st;
+      const fake = Object.create(Object.getPrototypeOf(st));
+      return Object.assign(fake, st, { dev: st.dev + 1 });
+    };
+    const res = lib.scanTree(root, { lstat, deadline: () => Infinity });
+    assert.deepEqual(res.foreignDev.map(canon), [foreign]);
+    assert.deepEqual(res.links.map(canon), [canon(path.join(root, 'a', 'b', 'link'))]);
+    assert.deepEqual(res.unreadable, []);
+    assert.equal(res.timedOut, false);
+    // Without the fake device the deep link is found too: there is no depth limit.
+    assert.equal(lib.scanTree(root, { deadline: () => Infinity }).links.length, 2);
+  });
+});
+
+// Mounting needs root (or CAP_SYS_ADMIN), or passwordless sudo (GitHub's
+// ubuntu runners have it). Otherwise these tests are skipped.
+const MOUNT = (() => {
+  if (process.platform !== 'linux') return { skip: 'mount tests are Linux-only' };
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  if (!asRoot && spawnSync('sudo', ['-n', 'true'], { stdio: 'ignore' }).status !== 0) {
+    return { skip: 'mount tests need root or passwordless sudo (sudo -n true failed)' };
+  }
+  const run = (...args) => {
+    const argv = asRoot ? args : ['sudo', '-n', ...args];
+    const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`${argv.join(' ')} failed: ${(r.stderr || String(r.error || '')).trim()}`);
+  };
+  const probe = path.join(ROOT, 'mount-probe');
+  fs.mkdirSync(probe);
+  try {
+    run('mount', '-t', 'tmpfs', 'tmpfs', probe);
+    run('umount', probe);
+  } catch (e) {
+    return { skip: `mount does not work here (${e.message.split('\n')[0]})` };
+  }
+  return { skip: false, run };
+})();
+
+describe('mount points inside a worktree', { skip: MOUNT.skip, concurrency: 4 }, () => {
+  // Mount, run `body`, always unmount (so the suite's cleanup never recurses
+  // into a mount either).
+  async function withMount(mountArgs, mp, body) {
+    fs.mkdirSync(mp, { recursive: true });
+    MOUNT.run('mount', ...mountArgs, mp);
+    try {
+      await body();
+    } finally {
+      MOUNT.run('umount', mp);
+    }
+  }
+
+  // Dry run, --apply and the session-start hook all keep the worktree.
+  async function assertKept(r, wt, branch, reasonRe) {
+    for (const args of [[], ['--apply']]) {
+      const { json, code } = await runJson(r, args);
+      const e = wtEntry(json, wt);
+      assert.equal(e.action, 'kept', `${args.join(' ') || 'dry run'}: ${e.reason}`);
+      assert.match(e.reason, reasonRe);
+      assert.equal(code, 0);
+    }
+    const hook = await janitor(['--hook', 'session-start'], { cwd: r.main, input: JSON.stringify({ cwd: r.main }), env: { FAKE_GH_DATA: r.ghData } });
+    assert.equal(hook.code, 0);
+    assert.doesNotMatch(hook.stdout, /removed \d+ merged worktree/);
+    assert.ok(fs.existsSync(path.join(wt, '.git')), 'worktree still there');
+    assert.ok(await branchExists(r, branch), 'branch kept');
+  }
+
+  test('same-filesystem bind mount at a gitignored path: kept, mounted source intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'bind', 'merge');
+    const src = path.join(r.dir, 'precious');
+    fs.mkdirSync(path.join(src, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'data.txt'), 'do-not-delete\n');
+    fs.writeFileSync(path.join(src, 'sub', 'more.txt'), 'more\n');
+    const mp = path.join(wt, 'node_modules');
+    await withMount(['--bind', src], mp, async () => {
+      assert.equal(await git(wt, 'status', '--porcelain'), '', 'ignored mount leaves the tree clean');
+      await assertKept(r, wt, 'bind', /contains mount point .*node_modules; unmount it first/);
+    });
+    assert.equal(fs.readFileSync(path.join(src, 'data.txt'), 'utf8'), 'do-not-delete\n');
+    assert.equal(fs.readFileSync(path.join(src, 'sub', 'more.txt'), 'utf8'), 'more\n');
+  });
+
+  test('tmpfs at a gitignored path: kept, its files intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'tmpfs', 'merge');
+    const mp = path.join(wt, 'node_modules');
+    await withMount(['-t', 'tmpfs', 'tmpfs'], mp, async () => {
+      fs.writeFileSync(path.join(mp, 'data.txt'), 'do-not-delete\n');
+      await assertKept(r, wt, 'tmpfs', /contains mount point .*node_modules; unmount it first/);
+      assert.equal(fs.readFileSync(path.join(mp, 'data.txt'), 'utf8'), 'do-not-delete\n');
+    });
+  });
+
+  test('bind mount nested 9 levels deep: kept, source intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'deep', 'merge');
+    const src = path.join(r.dir, 'precious');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, 'data.txt'), 'do-not-delete\n');
+    const mp = path.join(wt, 'node_modules', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'mnt');
+    await withMount(['--bind', src], mp, async () => {
+      await assertKept(r, wt, 'deep', /contains mount point .*node_modules\/a\/b\/c\/d\/e\/f\/g\/mnt; unmount it first/);
+    });
+    assert.equal(fs.readFileSync(path.join(src, 'data.txt'), 'utf8'), 'do-not-delete\n');
+  });
+
+  test('mount at a non-ignored path: kept as dirty, source intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'visible', 'merge');
+    const src = path.join(r.dir, 'precious');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, 'data.txt'), 'do-not-delete\n');
+    await withMount(['--bind', src], path.join(wt, 'data'), async () => {
+      await assertKept(r, wt, 'visible', /dirty/);
+    });
+    assert.equal(fs.readFileSync(path.join(src, 'data.txt'), 'utf8'), 'do-not-delete\n');
   });
 });
