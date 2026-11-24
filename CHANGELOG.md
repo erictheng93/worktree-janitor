@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.1.0]
+## [0.1.0] - 2026-11-24
 
 First release.
 
@@ -16,7 +16,7 @@ First release.
 - Codex CLI `PostToolUse` payloads are accepted (`tool_name` `Bash` on every OS, command as a plain string, argv arrays, shell wrappers, `gh.exe`); a UTF-8 BOM on stdin (Windows PowerShell 5.1) is stripped.
 - `scripts/install.mjs` (`--claude`, `--codex`, `--all`, `--uninstall`, `--dry-run`): installs the Claude Code plugin from a local clone, or Codex hooks (in `hooks.json` if present, else a marked `config.toml` block), skill and `AGENTS.md` rule. Idempotent, keeps Codex hook trust, backs up files once and restores the original bytes on uninstall.
 - `integrations/codex/`: `config.toml` and `hooks.json` templates for manual Codex setup, kept in sync with the installer by a test.
-- CI on Ubuntu, macOS and Windows with Node.js 18, 20 and 22, plus a Bun job; the Linux mount tests are required on Ubuntu.
+- CI on Ubuntu, macOS and Windows with Node.js 18, 20 and 22, plus a Bun job. Real mount tests are required on Ubuntu (bind mounts and tmpfs via `sudo mount`) and on macOS (disk images attached with `hdiutil`), so a skipped mount test fails CI.
 
 ### Safety
 
