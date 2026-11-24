@@ -144,26 +144,74 @@ function pidAlive(pid) {
 
 // ---------------------------------------------------------------- path helpers
 
+// Canonical form of a path for comparisons. git prints realpaths (on macOS
+// /var/folders/... comes back as /private/var/folders/..., and /tmp as
+// /private/tmp), while hook payloads, --repo and os.tmpdir() may not, so every
+// comparison goes through the OS realpath. For a path that does not exist (a
+// pruned worktree, a deleted cwd) the nearest existing ancestor is resolved
+// and the rest re-appended, so the /private prefix is still applied.
 function realish(p) {
-  try {
-    return fs.realpathSync.native(p);
-  } catch {
-    return path.resolve(p);
+  let cur = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(cur), ...rest);
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p);
+      rest.unshift(path.basename(cur));
+      cur = parent;
+    }
   }
 }
 
+// Case policy:
+//   win32  - fold case. NTFS is case-insensitive by default; folding is what
+//            made the original Windows behaviour correct.
+//   linux  - exact. ext4/xfs/btrfs are case-sensitive: /a/Wt and /a/wt are two
+//            different directories and must never be treated as one.
+//   darwin - exact, after realpath. APFS/HFS+ are case-insensitive by default
+//            but can be formatted case-sensitive, so folding would be wrong on
+//            the latter. On the former, Darwin's realpath(3) is expected to
+//            return each component's on-disk spelling, so two spellings of
+//            one directory realpath to the same string; and if it does not,
+//            the device+inode check in samePath/isInside still matches them.
 function normKey(p) {
-  const r = path.resolve(realish(p));
+  const r = realish(p);
   return IS_WIN ? r.toLowerCase() : r;
 }
 
+// Identity of an existing path (device + inode). A second, independent check
+// behind the string comparison: it holds however the path is spelled (case,
+// symlinked prefixes such as /var vs /private/var), so the safety guards do
+// not depend on realpath canonicalising case on darwin. Some filesystems
+// report inode 0 (FAT, some network shares): no identity then.
+function fileId(p) {
+  try {
+    const s = fs.statSync(p, { bigint: true });
+    return s.ino ? `${s.dev}:${s.ino}` : null;
+  } catch {
+    return null;
+  }
+}
+
 function samePath(a, b) {
-  return normKey(a) === normKey(b);
+  if (normKey(a) === normKey(b)) return true;
+  const ia = fileId(a);
+  return ia !== null && ia === fileId(b);
 }
 
 function isInside(child, parent) {
   const rel = path.relative(normKey(parent), normKey(child));
-  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+  if (rel === '') return true;
+  // `..x` is a legitimate child name; only `..` as a whole segment escapes.
+  if (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) return true;
+  const pid = fileId(parent);
+  if (pid === null) return false;
+  for (let cur = realish(child); ; cur = path.dirname(cur)) {
+    if (fileId(cur) === pid) return true;
+    if (path.dirname(cur) === cur) return false;
+  }
 }
 
 function lstatOrNull(p) {
