@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "timeout": 30,
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/janitor.mjs",
+              "--hook",
+              "session-start"
+            ]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "timeout": 30,
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/janitor.mjs",
+              "--hook",
+              "post-tool-use"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "worktree-janitor-marketplace",
+  "owner": {
+    "name": "worktree-janitor contributors"
+  },
+  "plugins": [
+    {
+      "name": "worktree-janitor",
+      "source": "./",
+      "description": "Removes git worktrees and local branches whose work is already merged, safely and automatically."
+    }
+  ],
+  "metadata": {
+    "description": "Local marketplace for the worktree-janitor plugin."
+  }
+}

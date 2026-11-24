@@ -1,0 +1,8 @@
+{
+  "name": "worktree-janitor",
+  "version": "0.1.0",
+  "description": "Removes git worktrees and local branches whose work is already merged, safely and automatically.",
+  "author": { "name": "worktree-janitor contributors" },
+  "license": "MIT",
+  "keywords": ["git", "worktree", "cleanup", "branches"]
+}
