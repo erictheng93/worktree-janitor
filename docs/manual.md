@@ -185,7 +185,7 @@ After `--codex`, start Codex and trust the two hooks (startup prompt or `/hooks`
 
 ### Manual Codex setup with the templates
 
-`integrations/codex/` holds the exact hooks the installer writes, with the placeholder path `/path/to/claude-worktree-janitor`:
+`integrations/codex/` holds the exact hooks the installer writes, with the placeholder path `/path/to/worktree-janitor`:
 
 - [`integrations/codex/config.toml`](../integrations/codex/config.toml): replace the placeholder with the absolute path of your clone (forward slashes also work on Windows) and append everything from the `# >>> worktree-janitor >>>` line on to `$CODEX_HOME/config.toml`. The markers let `node scripts/install.mjs --codex --uninstall` remove it later.
 - [`integrations/codex/hooks.json`](../integrations/codex/hooks.json): use this instead if you already keep hooks in `$CODEX_HOME/hooks.json`; merge its two groups into yours.

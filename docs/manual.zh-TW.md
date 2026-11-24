@@ -185,7 +185,7 @@ Codex 會合併 `hooks.json` 與 `config.toml` 內的 `[hooks]` 表格，但只�
 
 ### 用範本手動設定 Codex
 
-`integrations/codex/` 內有與安裝程式寫入內容完全相同的 hook，路徑使用佔位字串 `/path/to/claude-worktree-janitor`：
+`integrations/codex/` 內有與安裝程式寫入內容完全相同的 hook，路徑使用佔位字串 `/path/to/worktree-janitor`：
 
 - [`integrations/codex/config.toml`](../integrations/codex/config.toml)：把佔位字串換成你的 clone 的絕對路徑（Windows 上也可以用正斜線），然後把 `# >>> worktree-janitor >>>` 那一行起的所有內容附加到 `$CODEX_HOME/config.toml`。有了這些標記，日後可用 `node scripts/install.mjs --codex --uninstall` 移除。
 - [`integrations/codex/hooks.json`](../integrations/codex/hooks.json)：如果你的 hook 已經放在 `$CODEX_HOME/hooks.json`，改用這個檔案，把其中兩組 hook 合併進你的檔案。

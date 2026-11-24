@@ -282,8 +282,8 @@ process.stdout.write(out);
   });
 
   test('checked-in Codex templates match what the installer writes', () => {
-    const J = '/path/to/claude-worktree-janitor/scripts/janitor.mjs';
-    const I = '/path/to/claude-worktree-janitor/scripts/install.mjs';
+    const J = '/path/to/worktree-janitor/scripts/janitor.mjs';
+    const I = '/path/to/worktree-janitor/scripts/install.mjs';
     const json = JSON.parse(read(path.join(REPO, 'integrations', 'codex', 'hooks.json')));
     assert.deepEqual(json, { hooks: codexHooksObject(J, false) });
     const toml = read(path.join(REPO, 'integrations', 'codex', 'config.toml'));

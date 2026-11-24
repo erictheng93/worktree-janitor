@@ -1,6 +1,6 @@
 # worktree-janitor hooks for OpenAI Codex CLI, inline config.toml form.
 #
-# Manual setup: replace /path/to/claude-worktree-janitor with the absolute
+# Manual setup: replace /path/to/worktree-janitor with the absolute
 # path of your checkout (forward slashes also work on Windows), then append
 # everything from the ">>>" line on to $CODEX_HOME/config.toml (default
 # ~/.codex/config.toml). Start Codex and trust the hooks (startup prompt or
@@ -12,12 +12,12 @@
 # file instead. `node scripts/install.mjs --codex` does all of this for you.
 
 # >>> worktree-janitor >>>
-# Added by worktree-janitor. Remove with: node "/path/to/claude-worktree-janitor/scripts/install.mjs" --codex --uninstall
+# Added by worktree-janitor. Remove with: node "/path/to/worktree-janitor/scripts/install.mjs" --codex --uninstall
 [[hooks.SessionStart]]
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "node \"/path/to/claude-worktree-janitor/scripts/janitor.mjs\" --hook session-start"
+command = "node \"/path/to/worktree-janitor/scripts/janitor.mjs\" --hook session-start"
 timeout = 30
 
 [[hooks.PostToolUse]]
@@ -25,6 +25,6 @@ matcher = "Bash"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = "node \"/path/to/claude-worktree-janitor/scripts/janitor.mjs\" --hook post-tool-use"
+command = "node \"/path/to/worktree-janitor/scripts/janitor.mjs\" --hook post-tool-use"
 timeout = 30
 # <<< worktree-janitor <<<
