@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shellQuote, hookCommand, codexHooksObject, codexTomlBlock } from '../scripts/install.mjs';
+import { cmdQuote, shellQuote, hookCommand, codexHooksObject, codexTomlBlock } from '../scripts/install.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INSTALL = path.join(REPO, 'scripts', 'install.mjs');
@@ -289,5 +289,21 @@ process.stdout.write(out);
     const toml = read(path.join(REPO, 'integrations', 'codex', 'config.toml'));
     const block = ['# >>> worktree-janitor >>>', ...codexTomlBlock(J, false, I), '# <<< worktree-janitor <<<', ''].join('\n');
     assert.ok(toml.endsWith(block), 'config.toml template ends with the installer block');
+  });
+});
+
+describe('cmdQuote (cmd.exe argument quoting for claude.cmd)', () => {
+  test('quotes an argument that contains whitespace', () => {
+    assert.equal(cmdQuote('C:\\Users\\John Doe\\repo'), '"C:\\Users\\John Doe\\repo"');
+  });
+  test('does not quote a plain argument that merely contains the letter s', () => {
+    assert.equal(cmdQuote('C:\\Users\\sam\\plugins'), 'C:\\Users\\sam\\plugins');
+    assert.equal(cmdQuote('settings'), 'settings');
+  });
+  test('quotes an argument with a cmd metacharacter such as &', () => {
+    assert.equal(cmdQuote('a&b'), '"a&b"');
+  });
+  test('doubles embedded double quotes', () => {
+    assert.equal(cmdQuote('say "hi"'), '"say ""hi"""');
   });
 });

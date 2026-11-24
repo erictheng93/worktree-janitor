@@ -460,7 +460,7 @@ function installCodex(plan, uninstall) {
 // Windows an npm install is claude.cmd, which only runs through a shell.
 function claudeCommand() {
   const override = process.env.JANITOR_CLAUDE;
-  if (override) return /.(c|m)?js$/i.test(override) ? { cmd: process.execPath, pre: [override], shell: false } : { cmd: override, pre: [], shell: false };
+  if (override) return /\.(c|m)?js$/i.test(override) ? { cmd: process.execPath, pre: [override], shell: false } : { cmd: override, pre: [], shell: false };
   const exts = IS_WIN ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';').filter(Boolean) : [''];
   for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
     for (const ext of exts) {
@@ -470,16 +470,20 @@ function claudeCommand() {
       } catch {
         continue;
       }
-      return { cmd: p, pre: [], shell: IS_WIN && /.(cmd|bat)$/i.test(p) };
+      return { cmd: p, pre: [], shell: IS_WIN && /\.(cmd|bat)$/i.test(p) };
     }
   }
   return null;
 }
 
+// Quote one argument for cmd.exe when it holds whitespace, a metacharacter or
+// a double quote (embedded quotes are doubled). Plain arguments pass through.
+export const cmdQuote = (x) => (/[\s"&|<>^()%!]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x);
+
 function runClaude(args) {
   const c = claudeCommand();
   if (!c) return { missing: true };
-  const q = (x) => (/[s"&|<>^()%!]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x);
+  const q = cmdQuote;
   const argv = [...c.pre, ...args];
   const r = spawnSync(c.shell ? q(c.cmd) : c.cmd, c.shell ? argv.map(q) : argv, { encoding: 'utf8', windowsHide: true, timeout: 120_000, shell: c.shell });
   if (r.error && r.error.code === 'ENOENT') return { missing: true };
