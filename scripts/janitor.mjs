@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 // worktree-janitor: remove git worktrees (and their branches) whose work has
 // landed in the base branch, without ever deleting through links.
 //
@@ -41,9 +42,186 @@ const PR_MERGE_RE = /\bgh(?:\.exe)?\s+pr\s+merge\b/i;
 // session look alive; that errs on the side of keeping, which is safe.
 const CLAUDE_LOCK_RE = /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start (.{1,255}))?\)$/;
 
+// ---------------------------------------------------------------- types
+//
+// Type-checked with `tsc -p tsconfig.json` (JSDoc only, no build step).
+
+/**
+ * Parsed command line.
+ * @typedef {object} Options
+ * @property {boolean} apply          act instead of a dry run (implied by --hook)
+ * @property {string | null} repo     --repo, unresolved
+ * @property {string | null} base     --base
+ * @property {boolean} json           machine-readable report
+ * @property {string | null} hook     'session-start' | 'post-tool-use' once validated
+ * @property {boolean} includeLocked  also remove worktrees with a live or unknown lock
+ * @property {boolean} help
+ */
+
+/**
+ * Where the janitor runs from, decided by main().
+ * @typedef {object} Ctx
+ * @property {string} start                 absolute path to resolve the repository from
+ * @property {(string | null)[]} cwdGuards  directories whose enclosing worktrees are kept
+ * @property {number} ghTimeout             ms per `gh` call
+ */
+
+/**
+ * @typedef {object} RunOpts
+ * @property {string} [cwd]
+ * @property {number} [timeout]       ms, further capped by the time budget
+ * @property {string} [input]         stdin for the child
+ * @property {NodeJS.ProcessEnv} [env] merged over process.env
+ */
+
+/**
+ * @typedef {object} RunResult
+ * @property {boolean} ok              spawned and exited 0
+ * @property {number | null} status
+ * @property {string} stdout
+ * @property {string} stderr           also carries the spawn error message, if any
+ * @property {boolean} timedOut
+ * @property {string | null} [spawnError] errno code when the spawn itself failed
+ */
+
+/**
+ * One entry of `git worktree list --porcelain`.
+ * @typedef {object} Worktree
+ * @property {string} path
+ * @property {string | null} head      HEAD sha
+ * @property {string | null} branch    short branch name, null when detached
+ * @property {boolean} detached
+ * @property {boolean} bare
+ * @property {boolean} locked
+ * @property {string} lockReason       '' when none was given
+ * @property {boolean} prunable
+ */
+
+/**
+ * @typedef {object} RepoInfo
+ * @property {string} main            path of the main worktree
+ * @property {string | null} common   git common dir
+ */
+
+/**
+ * @typedef {object} Verdict
+ * @property {boolean} merged
+ * @property {number} ahead   commits ahead of base, -1 when unknown
+ * @property {string} reason
+ */
+
+/**
+ * @typedef {object} MergedPr
+ * @property {string} headRefOid
+ * @property {number} number
+ */
+
+/**
+ * @typedef {object} MountCheckResult
+ * @property {string[]} mounts
+ * @property {string | null} error   set when mounts could not be ruled out
+ */
+
+/**
+ * @typedef {object} ScanResult
+ * @property {string[]} links       symlinks / junctions / reparse points
+ * @property {string[]} foreignDev  directories on another device (not descended)
+ * @property {string[]} unreadable
+ * @property {boolean} timedOut
+ */
+
+/**
+ * @typedef {object} ScanOpts
+ * @property {(p: string) => { dev: number, isDirectory(): boolean, isSymbolicLink(): boolean }} [lstat]
+ * @property {() => number} [deadline]  ms left in the time budget
+ */
+
+/**
+ * @typedef {object} MountCheckOpts
+ * @property {NodeJS.Platform | string} [platform]
+ * @property {() => string} [read]   returns the mountinfo text
+ */
+
+/**
+ * A link removed by removeLinkOnly.
+ * @typedef {object} LinkRemoval
+ * @property {string} link
+ * @property {string | null} target   realpath of the target, null when dangling
+ * @property {boolean} targetExisted
+ */
+
+/**
+ * @typedef {object} TreeRemoval
+ * @property {number} removed       entries deleted
+ * @property {LinkRemoval[]} links
+ */
+
+/**
+ * @typedef {object} Problem
+ * @property {string} msg
+ * @property {boolean} safety
+ */
+
+/**
+ * @typedef {object} WorktreeRemoval
+ * @property {LinkRemoval[]} links
+ * @property {boolean} registered   git still lists the worktree
+ * @property {Problem[]} problems
+ */
+
+/** @typedef {'kept' | 'would-remove' | 'removed' | 'partial'} WorktreeAction */
+/** @typedef {'kept' | 'would-delete' | 'deleted'} BranchAction */
+
+/**
+ * @typedef {object} WorktreeReport
+ * @property {string} path
+ * @property {string | null} branch
+ * @property {WorktreeAction} action
+ * @property {string} reason
+ * @property {string} [stoppedAt]   where a 'partial' deletion stopped
+ */
+
+/**
+ * @typedef {object} BranchReport
+ * @property {string} name
+ * @property {BranchAction} action
+ * @property {string} reason
+ */
+
+/**
+ * What the janitor did (or would do); printed as is with --json.
+ * @typedef {object} Report
+ * @property {string | null} repo
+ * @property {string | null} base
+ * @property {boolean} applied
+ * @property {WorktreeReport[]} worktrees
+ * @property {BranchReport[]} branches
+ * @property {string[]} errors
+ */
+
+/**
+ * The parts of a Claude Code / Codex hook payload (stdin JSON) that are read.
+ * Every field is checked at runtime; the payload may have any shape.
+ * @typedef {object} HookPayload
+ * @property {unknown} [cwd]
+ * @property {string | HookToolInput | null} [tool_input]
+ */
+
+/**
+ * @typedef {object} HookToolInput
+ * @property {unknown} [command]   string, or an argv array
+ * @property {unknown} [cmd]       fallback name for command
+ */
+
 // ---------------------------------------------------------------- arguments
 
+/**
+ * @param {string[]} argv
+ * @returns {Options}
+ * @throws {UsageError}
+ */
 function parseArgs(argv) {
+  /** @type {Options} */
   const o = { apply: false, repo: null, base: null, json: false, hook: null, includeLocked: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -90,12 +268,22 @@ const HELP = `worktree-janitor: remove git worktrees and local branches already 
 
 // ---------------------------------------------------------------- process helpers
 
+/** Epoch ms after which no new child process is started (hook mode only). */
 let DEADLINE = Infinity;
+/** @returns {number} ms left in the time budget */
 const remaining = () => DEADLINE - Date.now();
 
+/**
+ * Run a command synchronously, never prompting, within the time budget.
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {RunOpts} [opts]
+ * @returns {RunResult}
+ */
 function run(cmd, args, { cwd, timeout = GIT_TIMEOUT_MS, input, env } = {}) {
   const left = remaining();
   if (left <= 250) return { ok: false, status: null, stdout: '', stderr: 'time budget exhausted', timedOut: true };
+  /** @type {import('node:child_process').SpawnSyncReturns<string> & { error?: NodeJS.ErrnoException }} */
   const r = spawnSync(cmd, args, {
     cwd,
     input,
@@ -116,15 +304,30 @@ function run(cmd, args, { cwd, timeout = GIT_TIMEOUT_MS, input, env } = {}) {
   };
 }
 
+/**
+ * @param {string[]} args
+ * @param {RunOpts} [opts]
+ * @returns {RunResult}
+ */
 function git(args, opts = {}) {
   return run('git', ['-c', 'core.quotepath=off', ...args], opts);
 }
 
+/**
+ * @param {string[]} args
+ * @param {RunOpts} [opts]
+ * @returns {string | null} trimmed stdout, or null when git failed
+ */
 function gitOut(args, opts) {
   const r = git(args, opts);
   return r.ok ? r.stdout.trim() : null;
 }
 
+/**
+ * The gh executable and leading arguments ($JANITOR_GH overrides; a .js/.mjs/.cjs
+ * override runs under the current runtime).
+ * @returns {[string, string[]]}
+ */
 function ghCommand() {
   const override = process.env.JANITOR_GH;
   if (override) {
@@ -134,12 +337,16 @@ function ghCommand() {
   return ['gh', []];
 }
 
+/**
+ * @param {number} pid
+ * @returns {boolean} true when the process exists (EPERM counts as alive)
+ */
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch (e) {
+  } catch (/** @type {any} */ e) {
     return e && e.code === 'EPERM';
   }
 }
@@ -152,8 +359,13 @@ function pidAlive(pid) {
 // comparison goes through the OS realpath. For a path that does not exist (a
 // pruned worktree, a deleted cwd) the nearest existing ancestor is resolved
 // and the rest re-appended, so the /private prefix is still applied.
+/**
+ * @param {string} p
+ * @returns {string}
+ */
 function realish(p) {
   let cur = path.resolve(p);
+  /** @type {string[]} */
   const rest = [];
   for (;;) {
     try {
@@ -178,6 +390,10 @@ function realish(p) {
 //            return each component's on-disk spelling, so two spellings of
 //            one directory realpath to the same string; and if it does not,
 //            the device+inode check in samePath/isInside still matches them.
+/**
+ * @param {string} p
+ * @returns {string}
+ */
 function normKey(p) {
   const r = realish(p);
   return IS_WIN ? r.toLowerCase() : r;
@@ -188,6 +404,10 @@ function normKey(p) {
 // symlinked prefixes such as /var vs /private/var), so the safety guards do
 // not depend on realpath canonicalising case on darwin. Some filesystems
 // report inode 0 (FAT, some network shares): no identity then.
+/**
+ * @param {string} p
+ * @returns {string | null} "dev:ino", or null when missing or without an inode
+ */
 function fileId(p) {
   try {
     const s = fs.statSync(p, { bigint: true });
@@ -197,12 +417,22 @@ function fileId(p) {
   }
 }
 
+/**
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
 function samePath(a, b) {
   if (normKey(a) === normKey(b)) return true;
   const ia = fileId(a);
   return ia !== null && ia === fileId(b);
 }
 
+/**
+ * @param {string} child
+ * @param {string} parent
+ * @returns {boolean} true when child is parent itself or below it
+ */
 function isInside(child, parent) {
   const rel = path.relative(normKey(parent), normKey(child));
   if (rel === '') return true;
@@ -216,6 +446,10 @@ function isInside(child, parent) {
   }
 }
 
+/**
+ * @param {string} p
+ * @returns {fs.Stats | null}
+ */
 function lstatOrNull(p) {
   try {
     return fs.lstatSync(p);
@@ -224,6 +458,11 @@ function lstatOrNull(p) {
   }
 }
 
+/**
+ * @param {string} p
+ * @param {{ isSymbolicLink(): boolean, isDirectory(): boolean }} st  lstat of p
+ * @returns {boolean}
+ */
 function isLink(p, st) {
   if (st.isSymbolicLink()) return true;
   // Belt and braces: Node and bun report NTFS junctions as symbolic links
@@ -240,6 +479,7 @@ function isLink(p, st) {
   return false;
 }
 
+/** @type {(p: string) => string} long-path (\\?\) form on win32, p elsewhere */
 const nsPath = (p) => (IS_WIN ? path.toNamespacedPath(path.resolve(p)) : p);
 
 // ---------------------------------------------------------------- mount points
@@ -262,7 +502,12 @@ const nsPath = (p) => (IS_WIN ? path.toNamespacedPath(path.resolve(p)) : p);
 // Field 5 is the mount point. The kernel writes space, tab, newline and
 // backslash in it as 3-digit octal escapes (\040 \011 \012 \134); every other
 // byte, including non-ASCII UTF-8, is written raw.
+/**
+ * @param {unknown} text  mountinfo contents (coerced with String)
+ * @returns {string[]} mount points
+ */
 export function parseMountinfo(text) {
+  /** @type {string[]} */
   const out = [];
   for (const line of String(text).split('\n')) {
     const f = line.split(' ');
@@ -273,6 +518,11 @@ export function parseMountinfo(text) {
 }
 
 // Mount points equal to or below `root` (a realpath), from mountinfo text.
+/**
+ * @param {string} mountinfoText
+ * @param {string} root
+ * @returns {string[]}
+ */
 export function mountPointsUnder(mountinfoText, root) {
   const prefix = root.endsWith('/') ? root : `${root}/`;
   return parseMountinfo(mountinfoText).filter((mp) => mp === root || mp.startsWith(prefix));
@@ -280,18 +530,24 @@ export function mountPointsUnder(mountinfoText, root) {
 
 // -> { mounts: string[], error: string | null }. On Linux an unreadable or
 // empty mountinfo is an error: the caller must then keep the worktree.
+/**
+ * @param {string} root  realpath of the worktree
+ * @param {MountCheckOpts} [opts]  injectable for tests
+ * @returns {MountCheckResult}
+ */
 export function mountCheck(root, { platform = process.platform, read = () => fs.readFileSync(MOUNTINFO, 'utf8') } = {}) {
   if (platform !== 'linux') return { mounts: [], error: null };
   let text;
   try {
     text = read();
-  } catch (e) {
+  } catch (/** @type {any} */ e) {
     return { mounts: [], error: `cannot read ${MOUNTINFO} (${(e && e.code) || (e && e.message) || e})` };
   }
   if (!parseMountinfo(text).length) return { mounts: [], error: `${MOUNTINFO} lists no mounts` };
   return { mounts: mountPointsUnder(text, root), error: null };
 }
 
+/** @type {(mounts: string[]) => string} */
 const mountReason = (mounts) => `contains mount point ${mounts[0]}${mounts.length > 1 ? ` (+${mounts.length - 1} more)` : ''}; unmount it first`;
 
 // Walk `root` with lstat to any depth, never descending into links, skipping
@@ -299,7 +555,13 @@ const mountReason = (mounts) => `contains mount point ${mounts[0]}${mounts.lengt
 // point), every directory on another device than `root` (not descended),
 // every directory that could not be read, and whether the time budget ran out.
 // `lstat` is injectable for tests.
+/**
+ * @param {string} root
+ * @param {ScanOpts} [opts]
+ * @returns {ScanResult}
+ */
 export function scanTree(root, { lstat = (p) => fs.lstatSync(p), deadline = () => remaining() } = {}) {
+  /** @type {ScanResult} */
   const res = { links: [], foreignDev: [], unreadable: [], timedOut: false };
   let rootDev;
   try {
@@ -343,6 +605,11 @@ export function scanTree(root, { lstat = (p) => fs.lstatSync(p), deadline = () =
 }
 
 // Why a worktree must be kept because of what is mounted in it (null = none).
+/**
+ * @param {string} wtPath
+ * @param {ScanResult} scan
+ * @returns {string | null}
+ */
 function mountKeepReason(wtPath, scan) {
   const m = mountCheck(realish(wtPath));
   if (m.error) return `${m.error}; cannot rule out mount points, not deleting`;
@@ -357,6 +624,11 @@ function mountKeepReason(wtPath, scan) {
 // POSIX: unlink(2) removes a symlink itself, whether it points to a file or a
 // directory; rmdir(2) / rm -r are never used on a link. win32: junctions and
 // directory symlinks may need RemoveDirectory, so rmdir (no /s) is tried too.
+/**
+ * @param {string} p
+ * @returns {LinkRemoval}
+ * @throws {SafetyError} when p stopped being a link or its target vanished
+ */
 function removeLinkOnly(p) {
   const np = nsPath(p);
   const before = lstatOrNull(np);
@@ -398,15 +670,25 @@ function removeLinkOnly(p) {
 // `safety` marks a surprise (type change, foreign device) as opposed to a
 // plain I/O failure.
 class StopError extends Error {
+  /**
+   * @param {string} message
+   * @param {string} at        path where deletion stopped
+   * @param {boolean} safety
+   */
   constructor(message, at, safety) {
     super(message);
     this.at = at;
     this.safety = safety;
     this.removed = 0;
+    /** @type {LinkRemoval[]} */
     this.links = [];
   }
 }
 
+/**
+ * @param {string} p
+ * @returns {fs.BigIntStats | null}
+ */
 function lstatBigOrNull(p) {
   try {
     return fs.lstatSync(p, { bigint: true });
@@ -429,14 +711,25 @@ const TEST_FOREIGN_DEV_AT = process.env.JANITOR_TEST_FOREIGN_DEV_AT || null;
 // nothing further is deleted, and the StopError says where. The root's
 // `.git` file goes last, so a stopped deletion leaves a registered worktree.
 // -> { removed, links }
+/**
+ * @param {string} root
+ * @returns {TreeRemoval}
+ * @throws {StopError}
+ */
 function removeTreeFailClosed(root) {
   const st0 = lstatBigOrNull(nsPath(root));
   if (!st0 || isLink(nsPath(root), st0) || !st0.isDirectory()) throw new StopError(`SAFETY: ${root} is not a plain directory`, root, true);
   const rootDev = st0.dev;
   const testKey = TEST_FOREIGN_DEV_AT ? normKey(TEST_FOREIGN_DEV_AT) : null;
   let testHits = 0;
+  /** @type {TreeRemoval} */
   const state = { removed: 0, links: [] };
 
+  /**
+   * @param {string} dir
+   * @param {fs.BigIntStats} expect  lstat from when dir was listed
+   * @returns {fs.BigIntStats}
+   */
   const checkDir = (dir, expect) => {
     const st = lstatBigOrNull(nsPath(dir));
     if (!st) throw new StopError(`SAFETY: ${dir} vanished during deletion`, dir, true);
@@ -446,6 +739,12 @@ function removeTreeFailClosed(root) {
     if (foreign || st.dev !== rootDev) throw new StopError(`SAFETY: ${dir} is on another device (a mount point?); stopped deleting`, dir, true);
     return st;
   };
+  /**
+   * Delete one entry; on failure chmod it to `mode` and try once more.
+   * @param {string} p
+   * @param {(np: string) => void} op
+   * @param {number} mode
+   */
   const retry = (p, op, mode) => {
     try {
       op(nsPath(p));
@@ -453,18 +752,23 @@ function removeTreeFailClosed(root) {
       try {
         fs.chmodSync(nsPath(p), mode);
         op(nsPath(p));
-      } catch (e) {
+      } catch (/** @type {any} */ e) {
         throw new StopError(`could not delete ${p}: ${(e && e.code) || (e && e.message) || e}`, p, false);
       }
     }
     state.removed++;
   };
+  /**
+   * @param {string} dir
+   * @param {fs.BigIntStats} expect
+   * @param {boolean} isRoot
+   */
   const removeDir = (dir, expect, isRoot) => {
     const st = checkDir(dir, expect);
     let names;
     try {
       names = fs.readdirSync(nsPath(dir));
-    } catch (e) {
+    } catch (/** @type {any} */ e) {
       throw new StopError(`cannot read ${dir}: ${(e && e.code) || e}`, dir, false);
     }
     if (isRoot && names.includes('.git')) names = [...names.filter((n) => n !== '.git'), '.git'];
@@ -475,7 +779,7 @@ function removeTreeFailClosed(root) {
       if (isLink(nsPath(p), cst)) {
         try {
           state.links.push(removeLinkOnly(p));
-        } catch (e) {
+        } catch (/** @type {any} */ e) {
           throw new StopError(e.message, p, e instanceof SafetyError);
         }
         state.removed++;
@@ -488,7 +792,7 @@ function removeTreeFailClosed(root) {
 
   try {
     removeDir(root, st0, true);
-  } catch (e) {
+  } catch (/** @type {any} */ e) {
     const stop = e instanceof StopError ? e : new StopError(`deletion failed: ${e && e.message}`, root, false);
     stop.removed = state.removed;
     stop.links = state.links;
@@ -502,6 +806,10 @@ function removeTreeFailClosed(root) {
 // (<common-dir>/worktrees/<id>/modules), which holds the submodules' object
 // stores and would be deleted along with the registration. Same rule here.
 // -> a reason to keep the worktree, or null.
+/**
+ * @param {string} wtPath
+ * @returns {string | null}
+ */
 function submoduleKeepReason(wtPath) {
   const ls = git(['ls-files', '-s', '-z'], { cwd: wtPath });
   if (!ls.ok) return `git ls-files failed: ${firstLine(ls.stderr)}`;
@@ -520,8 +828,14 @@ function submoduleKeepReason(wtPath) {
 
 // ---------------------------------------------------------------- git model
 
+/**
+ * @param {string} text  `git worktree list --porcelain` output
+ * @returns {Worktree[]}
+ */
 function parseWorktrees(text) {
+  /** @type {Worktree[]} */
   const out = [];
+  /** @type {Worktree | null} */
   let cur = null;
   for (const line of text.split(/\r?\n/)) {
     if (line.startsWith('worktree ')) {
@@ -546,7 +860,12 @@ function parseWorktrees(text) {
 // the file <common-dir>/worktrees/<id>/locked, whose sibling <id>/gitdir names
 // the worktree's .git file. This also works when the worktree directory is
 // gone. -> Map(normKey(worktree path) -> lock reason, '' when none given).
+/**
+ * @param {string} repo
+ * @returns {Map<string, string>}
+ */
 function adminLocks(repo) {
+  /** @type {Map<string, string>} */
   const locks = new Map();
   const c = gitOut(['rev-parse', '--git-common-dir'], { cwd: repo });
   if (!c) return locks;
@@ -575,6 +894,10 @@ function adminLocks(repo) {
   return locks;
 }
 
+/**
+ * @param {string} start
+ * @returns {RepoInfo | null} null when start is missing or not inside a repository
+ */
 function resolveRepo(start) {
   if (!start || !fs.existsSync(start)) return null;
   const top = gitOut(['rev-parse', '--show-toplevel'], { cwd: start });
@@ -593,10 +916,17 @@ function resolveRepo(start) {
   return { main, common };
 }
 
+/**
+ * @param {string} repo
+ * @param {string | null} requested  --base, or null to auto-detect
+ * @returns {string | null}
+ */
 function resolveBase(repo, requested) {
+  /** @type {(ref: string) => boolean} */
   const verify = (ref) => !!gitOut(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: repo });
   if (requested) return verify(requested) ? requested : null;
   const head = gitOut(['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], { cwd: repo });
+  /** @type {string[]} */
   const candidates = [];
   if (head) candidates.push(head.replace(/^refs\/remotes\//, ''));
   candidates.push('origin/main', 'origin/master', 'main', 'master');
@@ -607,15 +937,23 @@ function resolveBase(repo, requested) {
 // ---------------------------------------------------------------- merge decision
 
 class MergeOracle {
+  /**
+   * @param {string} repo
+   * @param {string} base
+   * @param {number} ghTimeout  ms per `gh` call
+   */
   constructor(repo, base, ghTimeout) {
     this.repo = repo;
     this.base = base;
     this.ghTimeout = ghTimeout;
     this.ghDisabled = false;
+    /** @type {Map<string, Verdict>} */
     this.cache = new Map();
+    /** @type {{ set: Set<string>, capped: boolean } | null} */
     this.firstParent = null;
   }
 
+  /** @returns {{ set: Set<string>, capped: boolean }} base's first-parent chain (capped) */
   firstParentSet() {
     if (this.firstParent) return this.firstParent;
     const out = gitOut(['rev-list', '--first-parent', `--max-count=${FIRST_PARENT_CAP}`, this.base], { cwd: this.repo }) || '';
@@ -624,6 +962,12 @@ class MergeOracle {
     return this.firstParent;
   }
 
+  /**
+   * A merged PR whose head was exactly `tip`, via gh; null when none or gh is unusable.
+   * @param {string} branch
+   * @param {string | undefined} tip
+   * @returns {MergedPr | null}
+   */
   ghMergedPr(branch, tip) {
     if (this.ghDisabled) return null;
     const [cmd, pre] = ghCommand();
@@ -637,6 +981,7 @@ class MergeOracle {
       return null;
     }
     try {
+      /** @type {unknown} */
       const prs = JSON.parse(r.stdout || '[]');
       return Array.isArray(prs) ? prs.find((p) => p && p.headRefOid === tip) || null : null;
     } catch {
@@ -645,6 +990,11 @@ class MergeOracle {
   }
 
   // -> { merged: boolean, ahead: number, reason: string }
+  /**
+   * @param {string} branch
+   * @param {string | undefined} tip  branch tip sha (undefined: unknown, compares as not merged)
+   * @returns {Verdict}
+   */
   check(branch, tip) {
     const key = `${branch}\0${tip}`;
     if (this.cache.has(key)) return this.cache.get(key);
@@ -653,6 +1003,11 @@ class MergeOracle {
     return res;
   }
 
+  /**
+   * @param {string} branch
+   * @param {string | undefined} tip
+   * @returns {Verdict}
+   */
   _check(branch, tip) {
     const aheadOut = gitOut(['rev-list', '--count', `${this.base}..${tip}`], { cwd: this.repo });
     if (aheadOut === null) return { merged: false, ahead: -1, reason: 'could not compare with base' };
@@ -682,10 +1037,19 @@ class MergeOracle {
 
 // ---------------------------------------------------------------- the janitor
 
+/**
+ * Decide, and with opts.apply act, for every worktree and local branch.
+ * @param {Options} opts
+ * @param {Ctx} ctx
+ * @returns {Report}
+ * @throws {Error} notRepo / UsageError / git too old (main() reports these)
+ */
 function janitor(opts, ctx) {
+  /** @type {Report} */
   const report = { repo: null, base: null, applied: opts.apply, worktrees: [], branches: [], errors: [] };
   const repoInfo = resolveRepo(ctx.start);
   if (!repoInfo) {
+    /** @type {Error & { notRepo?: boolean }} */
     const e = new Error(`not a git repository: ${ctx.start}`);
     e.notRepo = true;
     throw e;
@@ -714,20 +1078,25 @@ function janitor(opts, ctx) {
     wt.locked = true;
     if (!wt.lockReason) wt.lockReason = reason;
   }
+  /** @type {Map<string, string>} branch -> tip sha */
   const branchTips = new Map();
   for (const line of (gitOut(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads'], { cwd: repo }) || '').split(/\r?\n/)) {
     const [ref, sha] = line.split('\0');
     if (ref && sha) branchTips.set(ref.replace(/^refs\/heads\//, ''), sha);
   }
 
+  /** @type {Map<string | null, Worktree>} */
   const checkedOut = new Map(); // branch -> worktree entry still holding it
   for (const wt of wtList) if (wt.branch) checkedOut.set(wt.branch, wt);
 
+  /** @type {(b: string) => boolean} */
   const protectedBranch = (b) => b === baseLocal || PROTECTED_BRANCHES.has(b);
   const cwdGuards = ctx.cwdGuards.filter(Boolean);
   let safetyAbort = false;
   let pruneNeeded = false;
 
+  // Typed as returning void: callers `return wtReport(...)` only to stop.
+  /** @type {(wt: Worktree, action: WorktreeAction, reason: string, extra?: { stoppedAt?: string }) => void} */
   const wtReport = (wt, action, reason, extra = {}) => report.worktrees.push({ path: wt.path, branch: wt.branch, action, reason, ...extra });
 
   wtList.forEach((wt, idx) => {
@@ -784,7 +1153,7 @@ function janitor(opts, ctx) {
     let res;
     try {
       res = removeWorktree(repo, wt);
-    } catch (e) {
+    } catch (/** @type {any} */ e) {
       const stop = e instanceof StopError ? e : null;
       if (e instanceof SafetyError || (stop && stop.safety)) safetyAbort = true;
       report.errors.push(e.message);
@@ -847,6 +1216,12 @@ function janitor(opts, ctx) {
   return report;
 }
 
+/**
+ * @param {string} repo  main worktree
+ * @param {Worktree} wt
+ * @returns {WorktreeRemoval}
+ * @throws {SafetyError | StopError | Error} nothing (or, for a StopError, only part) was deleted
+ */
 function removeWorktree(repo, wt) {
   // Re-check the registration right before acting: never delete a path git
   // did not register, never the main worktree, never one containing it.
@@ -868,6 +1243,7 @@ function removeWorktree(repo, wt) {
 
   // Only once the tree is gone: unlock (a stopped deletion keeps the lock)
   // and drop the registration.
+  /** @type {Problem[]} */
   const problems = [];
   if (wt.locked) {
     const u = git(['worktree', 'unlock', wt.path], { cwd: repo });
@@ -886,13 +1262,23 @@ function removeWorktree(repo, wt) {
   return { links: res.links, registered, problems };
 }
 
+/**
+ * @param {unknown} s
+ * @returns {string} first non-empty-trimmed line, or 'unknown error'
+ */
 function firstLine(s) {
   return String(s || '').trim().split(/\r?\n/)[0] || 'unknown error';
 }
 
 // ---------------------------------------------------------------- output
 
+/**
+ * @param {Report} report
+ * @param {boolean} apply
+ * @returns {void}
+ */
 function printHuman(report, apply) {
+  /** @type {string[]} */
   const lines = [];
   lines.push(`worktree-janitor${apply ? '' : ' (dry run)'}  repo: ${report.repo}  base: ${report.base}`);
   lines.push('Worktrees:');
@@ -905,10 +1291,16 @@ function printHuman(report, apply) {
   process.stdout.write(lines.join('\n') + '\n');
 }
 
+/**
+ * @param {Report} report
+ * @returns {string} one line for the hook's stdout, '' when nothing happened
+ */
 function hookSummary(report) {
   const wts = report.worktrees.filter((w) => w.action === 'removed');
   const brs = report.branches.filter((b) => b.action === 'deleted');
+  /** @type {string[]} */
   const parts = [];
+  /** @type {(arr: string[]) => string} */
   const list = (arr) => (arr.length > 4 ? `${arr.slice(0, 4).join(', ')}, +${arr.length - 4} more` : arr.join(', '));
   if (wts.length) parts.push(`removed ${wts.length} merged worktree(s) (${list(wts.map((w) => path.basename(w.path)))})`);
   if (brs.length) parts.push(`deleted ${brs.length} merged branch(es) (${list(brs.map((b) => b.name))})`);
@@ -922,6 +1314,7 @@ function hookSummary(report) {
 
 // Windows PowerShell 5.1 prefixes piped stdin with a UTF-8 BOM (EF BB BF),
 // which decodes to U+FEFF and makes JSON.parse throw.
+/** @type {(s: string) => string} */
 const stripBom = (s) => s.replace(/^﻿/, '');
 
 // The shell command a PostToolUse payload ran, as one string ('' if none).
@@ -931,6 +1324,10 @@ const stripBom = (s) => s.replace(/^﻿/, '');
 // argv array (["bash", "-lc", "gh pr merge 5"]) is accepted too and joined
 // with spaces; PR_MERGE_RE is unanchored, so a merge inside a wrapper still
 // matches. Never throws, whatever the shape.
+/**
+ * @param {HookPayload | null} payload
+ * @returns {string}
+ */
 function hookCommandText(payload) {
   const input = payload && payload.tool_input;
   if (typeof input === 'string') return input;
@@ -941,11 +1338,18 @@ function hookCommandText(payload) {
   return '';
 }
 
+/**
+ * All of stdin as UTF-8 without a BOM; whatever arrived after `ms` ms, or ''
+ * for a TTY. Never rejects.
+ * @param {number} ms
+ * @returns {Promise<string>}
+ */
 function readStdin(ms) {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) return resolve('');
     // Collect raw bytes and decode once as UTF-8, so a multi-byte character
     // split across chunks decodes correctly.
+    /** @type {Buffer[]} */
     const chunks = [];
     let settled = false;
     const finish = () => {
@@ -973,6 +1377,7 @@ function readStdin(ms) {
 // process.cwd() throws ENOENT on POSIX when the directory we were started in
 // has been deleted (e.g. a hook firing in a just-removed worktree). Windows
 // cannot delete a process's cwd, so this only bites on Linux/macOS.
+/** @returns {string | null} */
 function safeCwd() {
   try {
     return process.cwd();
@@ -981,12 +1386,16 @@ function safeCwd() {
   }
 }
 
+/**
+ * @param {string[]} argv
+ * @returns {Promise<number>} exit code (always 0 in hook mode)
+ */
 async function main(argv) {
   let opts;
   const hookMode = argv.includes('--hook') || argv.some((a) => a.startsWith('--hook='));
   try {
     opts = parseArgs(argv);
-  } catch (e) {
+  } catch (/** @type {any} */ e) {
     if (hookMode) return 0;
     process.stderr.write(`worktree-janitor: ${e.message}\n${HELP}`);
     return 1;
@@ -1000,6 +1409,7 @@ async function main(argv) {
   if (opts.hook) {
     DEADLINE = Date.now() + HOOK_BUDGET_MS;
     const raw = await readStdin(opts.hook === 'post-tool-use' ? 3000 : 1000);
+    /** @type {HookPayload | null} */
     let payload = null;
     try {
       const text = stripBom(raw).trim();
@@ -1020,6 +1430,7 @@ async function main(argv) {
     return 1;
   }
   const start = cwd ? path.resolve(cwd, startRaw) : path.resolve(startRaw);
+  /** @type {Ctx} */
   const ctx = {
     start,
     cwdGuards: [cwd, hookCwd],
@@ -1037,7 +1448,7 @@ async function main(argv) {
     if (opts.json) process.stdout.write(JSON.stringify(report, null, 2) + '\n');
     else printHuman(report, opts.apply);
     return report.errors.length || report.worktrees.some((w) => w.action === 'partial') ? 1 : 0;
-  } catch (e) {
+  } catch (/** @type {any} */ e) {
     if (opts.hook) return 0;
     process.stderr.write(`worktree-janitor: ${e.message}\n`);
     return 1;
