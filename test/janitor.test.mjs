@@ -753,6 +753,22 @@ describe('mount detection helpers (no privileges needed)', () => {
   });
 });
 
+// Dry run, --apply and the session-start hook all keep the worktree.
+async function assertKept(r, wt, branch, reasonRe) {
+  for (const args of [[], ['--apply']]) {
+    const { json, code } = await runJson(r, args);
+    const e = wtEntry(json, wt);
+    assert.equal(e.action, 'kept', `${args.join(' ') || 'dry run'}: ${e.reason}`);
+    assert.match(e.reason, reasonRe);
+    assert.equal(code, 0);
+  }
+  const hook = await janitor(['--hook', 'session-start'], { cwd: r.main, input: JSON.stringify({ cwd: r.main }), env: { FAKE_GH_DATA: r.ghData } });
+  assert.equal(hook.code, 0);
+  assert.doesNotMatch(hook.stdout, /removed \d+ merged worktree/);
+  assert.ok(fs.existsSync(path.join(wt, '.git')), 'worktree still there');
+  assert.ok(await branchExists(r, branch), 'branch kept');
+}
+
 // Mounting needs root (or CAP_SYS_ADMIN), or passwordless sudo (GitHub's
 // ubuntu runners have it). Otherwise these tests are skipped.
 const MOUNT = (() => {
@@ -777,12 +793,6 @@ const MOUNT = (() => {
   return { skip: false, run };
 })();
 
-// CI sets JANITOR_REQUIRE_MOUNT_TESTS on ubuntu, where passwordless sudo
-// exists, so the mount tests cannot silently turn into skips there.
-test('mount tests are runnable where CI requires them', { skip: !process.env.JANITOR_REQUIRE_MOUNT_TESTS && 'JANITOR_REQUIRE_MOUNT_TESTS not set' }, () => {
-  assert.equal(MOUNT.skip, false, `mount tests would be skipped: ${MOUNT.skip}`);
-});
-
 describe('mount points inside a worktree', { skip: MOUNT.skip, concurrency: 4 }, () => {
   // Mount, run `body`, always unmount (so the suite's cleanup never recurses
   // into a mount either).
@@ -794,22 +804,6 @@ describe('mount points inside a worktree', { skip: MOUNT.skip, concurrency: 4 },
     } finally {
       MOUNT.run('umount', mp);
     }
-  }
-
-  // Dry run, --apply and the session-start hook all keep the worktree.
-  async function assertKept(r, wt, branch, reasonRe) {
-    for (const args of [[], ['--apply']]) {
-      const { json, code } = await runJson(r, args);
-      const e = wtEntry(json, wt);
-      assert.equal(e.action, 'kept', `${args.join(' ') || 'dry run'}: ${e.reason}`);
-      assert.match(e.reason, reasonRe);
-      assert.equal(code, 0);
-    }
-    const hook = await janitor(['--hook', 'session-start'], { cwd: r.main, input: JSON.stringify({ cwd: r.main }), env: { FAKE_GH_DATA: r.ghData } });
-    assert.equal(hook.code, 0);
-    assert.doesNotMatch(hook.stdout, /removed \d+ merged worktree/);
-    assert.ok(fs.existsSync(path.join(wt, '.git')), 'worktree still there');
-    assert.ok(await branchExists(r, branch), 'branch kept');
   }
 
   test('same-filesystem bind mount at a gitignored path: kept, mounted source intact', async () => {
@@ -862,5 +856,185 @@ describe('mount points inside a worktree', { skip: MOUNT.skip, concurrency: 4 },
       await assertKept(r, wt, 'visible', /dirty/);
     });
     assert.equal(fs.readFileSync(path.join(src, 'data.txt'), 'utf8'), 'do-not-delete\n');
+  });
+});
+
+// macOS has no bind mounts or tmpfs, and no /proc/self/mountinfo: the janitor
+// sees a mount there only through st_dev (scanTree). A disk image attached
+// with hdiutil is a separate device, i.e. a real mount, needing no root on a
+// normal user session; passwordless sudo (GitHub's macOS runners have it) is
+// the fallback. Otherwise these tests are skipped.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+const HDI = (() => {
+  if (process.platform !== 'darwin') return { skip: 'hdiutil mount tests are macOS-only' };
+  if (spawnSync('hdiutil', ['help'], { stdio: 'ignore' }).error) return { skip: 'hdiutil not found' };
+  const canSudo = spawnSync('sudo', ['-n', 'true'], { stdio: 'ignore' }).status === 0;
+  const exec = (sudo, args) => {
+    const argv = sudo ? ['sudo', '-n', 'hdiutil', ...args] : ['hdiutil', ...args];
+    const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`${argv.join(' ')} failed: ${(r.stderr || r.stdout || String(r.error || '')).trim()}`);
+  };
+  // hdiutil now and then fails transiently ("Resource temporarily
+  // unavailable", "resource busy"): retry a few times before giving up.
+  const retry = (fn, tries = 5) => {
+    for (let i = 1; ; i++) {
+      try {
+        return fn();
+      } catch (e) {
+        if (i >= tries) throw e;
+        sleepSync(500 * i);
+      }
+    }
+  };
+  let n = 0;
+  const create = () => {
+    const dmg = path.join(ROOT, `jt-${++n}.dmg`);
+    retry(() => exec(false, ['create', '-quiet', '-size', '8m', '-fs', 'HFS+', '-volname', `jt${n}`, '-type', 'UDIF', dmg]));
+    return dmg;
+  };
+  let sudo = false;
+  const attach = (dmg, mp) => {
+    fs.mkdirSync(mp, { recursive: true });
+    retry(() => exec(sudo, ['attach', '-quiet', '-nobrowse', '-noautoopen', '-noverify', '-mountpoint', mp, dmg]));
+  };
+  const detach = (mp) => retry(() => exec(sudo, ['detach', '-quiet', '-force', mp]));
+
+  // Probe: attach without sudo, then with `sudo -n`; the volume must be
+  // writable and on its own device.
+  const probe = path.join(ROOT, 'hdi-probe');
+  let dmg;
+  try {
+    dmg = create();
+  } catch (e) {
+    return { skip: `hdiutil create does not work here (${e.message.split('\n')[0]})` };
+  }
+  const errors = [];
+  for (const withSudo of canSudo ? [false, true] : [false]) {
+    sudo = withSudo;
+    try {
+      attach(dmg, probe);
+    } catch (e) {
+      errors.push(e.message.split('\n')[0]);
+      continue;
+    }
+    try {
+      fs.writeFileSync(path.join(probe, 'probe.txt'), 'x');
+      if (fs.lstatSync(probe).dev === fs.lstatSync(ROOT).dev) throw new Error('attached volume has the same st_dev as its parent');
+    } catch (e) {
+      errors.push(`${withSudo ? 'sudo ' : ''}attach: ${e.message}`);
+      detach(probe);
+      continue;
+    }
+    detach(probe);
+    return { skip: false, sudo, create, attach, detach };
+  }
+  return { skip: `hdiutil attach does not work here (${errors.join('; ')})` };
+})();
+
+// CI sets JANITOR_REQUIRE_MOUNT_TESTS on ubuntu (passwordless sudo) and macOS
+// (hdiutil), so the mount tests cannot silently turn into skips there.
+test('mount tests are runnable where CI requires them', { skip: !process.env.JANITOR_REQUIRE_MOUNT_TESTS && 'JANITOR_REQUIRE_MOUNT_TESTS not set' }, () => {
+  const skip = process.platform === 'darwin' ? HDI.skip : MOUNT.skip;
+  assert.equal(skip, false, `mount tests would be skipped: ${skip}`);
+});
+
+describe('macOS disk image (hdiutil) mounted inside a worktree', { skip: HDI.skip, concurrency: 1 }, () => {
+  // A fresh image with `files` on it, attached at `mp` for `body`, always
+  // detached afterwards (so the suite's cleanup never recurses into it).
+  async function withImage(mp, files, body) {
+    const dmg = HDI.create();
+    HDI.attach(dmg, mp);
+    try {
+      for (const [name, content] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(mp, name)), { recursive: true });
+        fs.writeFileSync(path.join(mp, name), content);
+      }
+      await body();
+    } finally {
+      HDI.detach(mp);
+    }
+    return dmg;
+  }
+
+  // The image still holds `files` after the janitor ran: re-attach it elsewhere.
+  function assertImageHolds(dmg, files) {
+    const mp = path.join(ROOT, `verify-${path.basename(dmg, '.dmg')}`);
+    HDI.attach(dmg, mp);
+    try {
+      for (const [name, content] of Object.entries(files)) assert.equal(fs.readFileSync(path.join(mp, name), 'utf8'), content, name);
+    } finally {
+      HDI.detach(mp);
+    }
+  }
+
+  const PRECIOUS = { 'data.txt': 'do-not-delete\n', 'sub/more.txt': 'more\n' };
+
+  test(`image attached at a gitignored path (${HDI.sudo ? 'sudo ' : ''}hdiutil): st_dev differs from the worktree root's`, async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'hdidev', 'merge');
+    const mp = path.join(wt, 'node_modules');
+    await withImage(mp, PRECIOUS, async () => {
+      // This is the only signal the janitor has on macOS.
+      const rootDev = fs.lstatSync(wt).dev;
+      assert.notEqual(fs.lstatSync(mp).dev, rootDev, 'mount point is on another device');
+      assert.equal(fs.lstatSync(path.join(mp, 'sub')).dev, fs.lstatSync(mp).dev, 'inside the image: same device as its root');
+      assert.equal(fs.lstatSync(path.join(wt, 'README.md')).dev, rootDev);
+      assert.deepEqual(lib.scanTree(wt, { deadline: () => Infinity }).foreignDev.map(canon), [canon(mp)]);
+      // No mountinfo on macOS: the st_dev walk is all there is.
+      assert.deepEqual(lib.mountCheck(wt), { mounts: [], error: null });
+    });
+  });
+
+  test('image attached at a gitignored path: kept, data on the image intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'hdi', 'merge');
+    const mp = path.join(wt, 'node_modules');
+    const dmg = await withImage(mp, PRECIOUS, async () => {
+      assert.equal(await git(wt, 'status', '--porcelain'), '', 'ignored mount leaves the tree clean');
+      await assertKept(r, wt, 'hdi', /contains mount point .*node_modules; unmount it first/);
+      assert.equal(fs.readFileSync(path.join(mp, 'data.txt'), 'utf8'), 'do-not-delete\n');
+    });
+    assertImageHolds(dmg, PRECIOUS);
+  });
+
+  test('image attached 9 levels deep: kept, data on the image intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'hdideep', 'merge');
+    const mp = path.join(wt, 'node_modules', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'mnt');
+    const dmg = await withImage(mp, PRECIOUS, async () => {
+      await assertKept(r, wt, 'hdideep', /contains mount point .*node_modules\/a\/b\/c\/d\/e\/f\/g\/mnt; unmount it first/);
+    });
+    assertImageHolds(dmg, PRECIOUS);
+  });
+
+  test('image attached at a non-ignored path: kept as dirty, data on the image intact', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'hdivisible', 'merge');
+    const dmg = await withImage(path.join(wt, 'data'), PRECIOUS, async () => {
+      await assertKept(r, wt, 'hdivisible', /dirty/);
+    });
+    assertImageHolds(dmg, PRECIOUS);
+  });
+
+  test('dry run (human output) reports the worktree kept with the mount reason and changes nothing', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'hdidry', 'merge');
+    const mp = path.join(wt, 'node_modules');
+    const before = await git(r.main, 'worktree', 'list', '--porcelain');
+    const dmg = await withImage(mp, PRECIOUS, async () => {
+      const res = await janitor([], { cwd: r.main, env: { FAKE_GH_DATA: r.ghData } });
+      assert.equal(res.code, 0, res.stderr);
+      assert.match(res.stdout, /\(dry run\)/);
+      const lines = res.stdout.split('\n');
+      const i = lines.findIndex((l) => l.includes(wt));
+      assert.ok(i >= 0, `worktree listed:\n${res.stdout}`);
+      assert.match(lines[i], /^\s+kept\s/);
+      assert.match(lines[i + 1], /contains mount point .*node_modules; unmount it first/);
+      assert.match(res.stdout, /Dry run: nothing was changed/);
+    });
+    assert.equal(await git(r.main, 'worktree', 'list', '--porcelain'), before);
+    assert.ok(await branchExists(r, 'hdidry'));
+    assertImageHolds(dmg, PRECIOUS);
   });
 });
