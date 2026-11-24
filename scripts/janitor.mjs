@@ -702,7 +702,11 @@ function janitor(opts, ctx) {
   const baseLocal = base.replace(/^(origin|upstream)\//, '');
 
   const oracle = new MergeOracle(repo, base, ctx.ghTimeout);
-  const wtList = parseWorktrees(gitOut(['worktree', 'list', '--porcelain'], { cwd: repo }) || '');
+  // Fail closed: without the worktree list nothing is known about which
+  // branches are checked out (git before 2.7 has no `worktree list`).
+  const listed = git(['worktree', 'list', '--porcelain'], { cwd: repo });
+  if (!listed.ok) throw new Error(`git worktree list --porcelain failed (git 2.7 or newer is required): ${firstLine(listed.stderr)}`);
+  const wtList = parseWorktrees(listed.stdout);
   const locks = adminLocks(repo);
   for (const wt of wtList) {
     const reason = locks.get(normKey(wt.path));
