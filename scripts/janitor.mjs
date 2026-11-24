@@ -270,7 +270,16 @@ function scanLinks(root, maxDepth = LINK_SCAN_DEPTH) {
 }
 
 // Remove ONE link without touching what it points to, then prove it.
+// POSIX: unlink(2) removes a symlink itself, whether it points to a file or a
+// directory; rmdir(2) / rm -r are never used on a link. win32: junctions and
+// directory symlinks may need RemoveDirectory, so rmdir (no /s) is tried too.
 function removeLinkOnly(p) {
+  const np = nsPath(p);
+  const before = lstatOrNull(np);
+  if (!before) return { link: p, target: null, targetExisted: false };
+  // Re-check right before acting: if this is no longer a link (replaced by a
+  // real directory since the scan), refuse rather than delete real content.
+  if (!isLink(np, before)) throw new SafetyError(`SAFETY: ${p} is no longer a link; refusing to remove it`);
   let target = null;
   try {
     target = fs.realpathSync.native(p);
@@ -278,9 +287,9 @@ function removeLinkOnly(p) {
     target = null; // dangling link: nothing to protect
   }
   const targetExisted = target !== null && fs.existsSync(target);
-  const np = nsPath(p);
+  const attempts = IS_WIN ? [() => fs.unlinkSync(np), () => fs.rmdirSync(np)] : [() => fs.unlinkSync(np)];
   let done = false;
-  for (const attempt of [() => fs.unlinkSync(np), () => fs.rmdirSync(np)]) {
+  for (const attempt of attempts) {
     try {
       attempt();
       done = true;
@@ -643,13 +652,16 @@ function removeWorktree(repo, wt, scan) {
   }
 
   // (b) git worktree remove (no --force). Fall back to the link-safe deleter
-  // only for long-path failures, links possibly below the scan depth, or
+  // only for long-path failures (win32), links possibly below the scan depth, or
   // tracked links we removed ourselves.
   let useFallback = rescan.truncated || trackedLinkRemoved;
   if (!useFallback) {
     const r = git(['worktree', 'remove', wt.path], { cwd: repo });
     if (!r.ok) {
-      if (/filename too long|path too long|name too long/i.test(r.stderr)) useFallback = true;
+      // Long-path fallback is win32-only: there safeRemoveTree reaches past
+      // MAX_PATH through \\?\ paths. POSIX has no such escape hatch, so the
+      // fallback would only fail a second time; report git's error instead.
+      if (IS_WIN && /filename too long|path too long|name too long/i.test(r.stderr)) useFallback = true;
       else throw new Error(`git worktree remove failed: ${firstLine(r.stderr)}`);
     }
   }
