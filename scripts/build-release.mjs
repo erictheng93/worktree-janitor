@@ -45,7 +45,9 @@ export const INSTALLERS = ['install.sh', 'install.ps1'];
 
 /** @param {string[]} args */
 function git(args) {
-  const r = spawnSync('git', args, { cwd: REPO, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+  // safe.directory: a checkout owned by another user (CI containers) is
+  // still ours to read.
+  const r = spawnSync('git', ['-c', `safe.directory=${REPO}`, ...args], { cwd: REPO, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr ? r.stderr.toString().trim() : r.error}`);
   return r.stdout.toString('utf8');
 }
