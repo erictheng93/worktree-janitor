@@ -520,7 +520,9 @@ function codexAgents(plan, p, uninstall) {
 function installCodex(plan, uninstall) {
   const p = codexPaths();
   log(`Codex (${uninstall ? 'uninstall' : 'install'}): CODEX_HOME=${p.codexHome}`);
-  if (!uninstall && !fs.existsSync(path.join(REPO_ROOT, 'scripts', 'janitor.mjs'))) throw new Error(`janitor not found at ${JANITOR}`);
+  // A dry run of a first install points --root at a directory that does
+  // not exist yet (the installers have not unpacked anything).
+  if (!uninstall && !plan.dryRun && !fs.existsSync(path.join(REPO_ROOT, 'scripts', 'janitor.mjs'))) throw new Error(`janitor not found at ${JANITOR}`);
   codexHooks(plan, p, uninstall);
   codexSkill(plan, p, uninstall);
   codexAgents(plan, p, uninstall);
