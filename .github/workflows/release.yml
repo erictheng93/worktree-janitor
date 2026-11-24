@@ -7,11 +7,21 @@ name: Release
 # that points Formula/worktree-janitor.rb at the new tarball.
 #
 # workflow_dispatch is a dry run: tests, build, and the assets uploaded as a
-# workflow artifact. It never creates a release.
+# workflow artifact. It never creates a release. Pull requests that change
+# the release machinery run the same dry run (a workflow_dispatch workflow
+# can only be dispatched once it is on the default branch).
 
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/build-release.mjs
+      - scripts/update-formula.mjs
+      - install.sh
+      - install.ps1
+      - test/channels/**
   workflow_dispatch:
     inputs:
       dry_run:
