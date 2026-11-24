@@ -86,24 +86,45 @@ A **mount point** is a directory where another filesystem (or a bind mount of a 
 
 ## Installation
 
+The [README](../README.md#installation) has the short version: the recommended channel for each audience and copy-paste commands for every channel. This chapter adds what each channel creates, every option, and how updates and uninstalls behave. Commands use `v0.1.0`; substitute the release you want.
+
+### Choosing a channel
+
+| You use | Recommended | Why |
+| --- | --- | --- |
+| Claude Code (CLI or desktop app) | [Claude Code plugin](#claude-code-plugin) from the GitHub marketplace, pinned to a tag | No local files to manage; the plugin ships the hooks and `/worktree-janitor:clean-worktrees` |
+| Codex (CLI or desktop app) | [Codex plugin](#codex-plugin) from the GitHub marketplace, pinned with `--ref`, then trust its hooks | The same for Codex; the plugin's hooks find `node` without `PATH` |
+| Neither, on macOS or Linux | [Homebrew](#homebrew) | Updates with `brew upgrade`; Node.js comes as a dependency |
+| Neither, on Windows | [install.ps1](#installps1-windows) | No admin rights; puts `worktree-janitor` on the user `PATH` |
+| One verified copy for scripts, or both agents from one copy | [install.sh](#installsh-macos-linux) / [install.ps1](#installps1-windows) with `--claude --codex` / `-Claude -Codex` | SHA-256-verified release archive; hook paths survive upgrades |
+
+Use **one channel per tool**:
+
+- **Claude Code:** a plugin from the GitHub marketplace and the installers' local marketplace have the same marketplace name, `worktree-janitor-marketplace`. The installers leave a marketplace from another channel alone: they print `skipped: marketplace worktree-janitor-marketplace already comes from ...` and change nothing.
+- **Codex:** the plugin and installer hooks (`install.sh --codex`, `install.ps1 -Codex`, `install.mjs --codex`) register the same two hooks, so together every hook runs twice. `install.mjs` warns when it finds the plugin enabled.
+
+### Requirements
+
+- **Node.js 18 or newer**, or Bun, to run the janitor. How to install it on each OS: [README prerequisites](../README.md#prerequisites).
+- **git** on `PATH`. The janitor refuses to run when `git worktree list --porcelain` fails, which is the case for git older than 2.7 (`git 2.7 or newer is required`). The oldest git exercised in CI is 2.25.1.
+- **gh** (GitHub CLI), optional: needed only for squash merges and a few other cases ([How a branch counts as merged](#how-a-branch-counts-as-merged)).
+- `install.sh`: `curl` or `wget`, `tar`, and one of `sha256sum`, `shasum`, `openssl`. `install.ps1`: Windows PowerShell 5.1 or PowerShell 7.
+
 ### Claude Code plugin
 
-From GitHub (shell; the default scope is `user`, which applies to every project):
+Claude Code's CLI and desktop app share `~/.claude`, so installing from a terminal makes the plugin available in both. Restart running sessions or the app afterwards.
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor
+claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-The marketplace source can also be written as a URL, `https://github.com/erictheng93/worktree-janitor`, or as the path of a local clone. One-step alternative:
+- The marketplace source can also be written `erictheng93/worktree-janitor#v0.1.0`, as the URL `https://github.com/erictheng93/worktree-janitor`, or as the path of a local directory. Without `@<tag>` it follows the default branch, which is not a release.
+- One-step form, Claude Code 2.1.292 and newer: `claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.1.0`.
+- In an interactive Claude Code session the same commands are available as `/plugin marketplace add ...` and `/plugin install ...`.
+- The default scope is `user`, which applies to every project. Nothing prompts: the plugin has no `userConfig`.
 
-```
-claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor
-```
-
-Inside Claude Code, the same is available as `/plugin marketplace add erictheng93/worktree-janitor` and `/plugin install worktree-janitor@worktree-janitor-marketplace`.
-
-Restart Claude Code after installing. The plugin provides:
+The plugin provides:
 
 | Component | Details |
 | --- | --- |
@@ -111,37 +132,230 @@ Restart Claude Code after installing. The plugin provides:
 | `PostToolUse` hook | matcher `Bash\|PowerShell`, `node ... --hook post-tool-use`, 30 s timeout; acts only after `gh pr merge` |
 | `/worktree-janitor:clean-worktrees` | Dry run, shows the report, asks you to confirm, then runs with `--apply`. Only you can invoke it; the model does not call it on its own |
 
-The hooks use exec form (`"command": "node"` plus an `args` array), so no shell is involved and paths with spaces need no quoting. `node` must be on `PATH`.
+The hooks use exec form (`"command": "node"` plus an `args` array), so no shell is involved and paths with spaces need no quoting. **`node` must be on the `PATH` of the Claude Code process.** A terminal session has your shell's `PATH`. The desktop app started from the Dock or the Start menu may not: on macOS, apps started by launchd get only `/usr/bin:/bin:/usr/sbin:/sbin` unless the app imports the login shell's environment. If the hooks do not run in the desktop app, install Node.js where that `PATH` finds it (on Windows the nodejs.org installer and `winget` add it to the system `PATH`), or start the app from a terminal.
 
-Update later with:
+**Verify:** `claude plugin list` shows `worktree-janitor@worktree-janitor-marketplace` with version `0.1.0`; `/worktree-janitor:clean-worktrees` exists in a session; `claude --debug-file <file>` logs `SessionStart:startup [node .../scripts/janitor.mjs --hook session-start] ... finished with status 0`.
 
-```
-claude plugin marketplace update worktree-janitor-marketplace
-claude plugin update worktree-janitor@worktree-janitor-marketplace
-```
-
-### Codex CLI plugin
+**Update:** `claude plugin marketplace update` stays on the pinned tag, and Claude Code only updates a plugin whose version changed, so move the pin:
 
 ```
-codex plugin marketplace add erictheng93/worktree-janitor
+claude plugin marketplace remove worktree-janitor-marketplace
+claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.2.0
+```
+
+On a Claude Code without the one-step form, re-add the marketplace with the new tag and run `claude plugin install worktree-janitor@worktree-janitor-marketplace`. Restart sessions after updating. An unpinned marketplace updates with `claude plugin marketplace update worktree-janitor-marketplace` and `claude plugin update worktree-janitor@worktree-janitor-marketplace`.
+
+**Uninstall:**
+
+```
+claude plugin uninstall worktree-janitor@worktree-janitor-marketplace
+claude plugin marketplace remove worktree-janitor-marketplace
+```
+
+### Codex plugin
+
+Codex CLI and the desktop app share `CODEX_HOME` (default `~/.codex`), so installing from a terminal covers both.
+
+```
+codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
 `codex plugin marketplace add` also accepts `owner/repo@ref`, an HTTPS or SSH git URL, or a local path. Codex copies the plugin into `$CODEX_HOME/plugins/cache/` and enables it in `config.toml`.
 
+Then **trust the two hooks**: in the CLI, `/hooks` or the prompt at startup; in the desktop app, Settings > Hooks. Untrusted hooks never run, and `codex exec` skips them silently.
+
 | Component | Details |
 | --- | --- |
-| `SessionStart` hook | `node "${PLUGIN_ROOT}/scripts/janitor.mjs" --hook session-start`, 30 s timeout |
-| `PostToolUse` hook | matcher `Bash`, `node "${PLUGIN_ROOT}/scripts/janitor.mjs" --hook post-tool-use`, 30 s timeout |
+| `SessionStart` hook | runs `${PLUGIN_ROOT}/scripts/janitor.mjs --hook session-start` with the first node it finds (below), 30 s timeout |
+| `PostToolUse` hook | matcher `Bash`, the same with `--hook post-tool-use`, 30 s timeout |
 | `$clean-worktrees` skill | Same dry-run-then-confirm flow as the Claude Code command; explicit invocation only |
 
-After installing, start Codex and trust the hooks: Codex asks at startup, or open `/hooks`. Untrusted hooks never run. Refresh a GitHub-installed marketplace with `codex plugin marketplace upgrade worktree-janitor-marketplace`.
+The plugin's hooks do not need `node` on `PATH`. On macOS and Linux (`command`, run by `sh`) they try node on `PATH`, `/opt/homebrew/bin/node`, `/usr/local/bin/node`, `~/.volta/bin/node`, and fnm's default alias (`~/.local/share/fnm/aliases/default/bin/node`, `~/Library/Application Support/fnm/aliases/default/bin/node`), and exit 0 silently when there is none. On Windows (`commandWindows`, run by PowerShell) they try `node.exe` on `PATH`, then `%ProgramFiles%\nodejs\node.exe`. nvm, asdf, mise and `n` installs are found only through `PATH`.
 
-Do not also run `install.mjs --codex`: both register the same hooks, so they would run twice. The installer prints a warning when it finds the plugin enabled.
+**Verify:** `codex plugin list` shows `worktree-janitor@worktree-janitor-marketplace` enabled with version `0.1.0`; `/hooks` lists a SessionStart and a PostToolUse (`Bash`) hook from the plugin.
 
-### The installer: scripts/install.mjs
+**Update:** adding the marketplace again with another `--ref` fails ("already added from a different source"), so remove and re-add:
 
-The installer works from a clone and points everything at **that clone's** `scripts/janitor.mjs`, so keep the clone where it is (moving it means reinstalling).
+```
+codex plugin remove worktree-janitor@worktree-janitor-marketplace
+codex plugin marketplace remove worktree-janitor-marketplace
+codex plugin marketplace add erictheng93/worktree-janitor --ref v0.2.0
+codex plugin add worktree-janitor@worktree-janitor-marketplace
+```
+
+Then **trust the hooks again**. Codex computes hook trust over the content of every file of an installed plugin, so each update needs a new approval. An unpinned marketplace refreshes with `codex plugin marketplace upgrade worktree-janitor-marketplace`.
+
+**Uninstall:** the first two commands of the update. An empty `$CODEX_HOME/plugins/cache/worktree-janitor-marketplace` directory is left behind.
+
+### install.ps1 (Windows)
+
+Runs under Windows PowerShell 5.1 and PowerShell 7, without administrator rights. On Windows PowerShell 5.1 it enables TLS 1.2 for its downloads.
+
+```powershell
+# a specific release, with options (recommended)
+& ([scriptblock]::Create((irm https://github.com/erictheng93/worktree-janitor/releases/download/v0.1.0/install.ps1))) -Version v0.1.0 -None
+
+# the latest release; `iex` cannot pass options
+irm https://github.com/erictheng93/worktree-janitor/releases/latest/download/install.ps1 | iex
+
+# a downloaded copy
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version v0.1.0 -All
+```
+
+Without `-Version`, the script installs the latest release, whichever URL it was downloaded from. `-Version` also accepts `0.1.0` without the `v`.
+
+| Option | Effect |
+| --- | --- |
+| `-Version vX.Y.Z` | Release to install (default: the latest, from the GitHub API) |
+| `-Dir DIR` | Install root (default `%LOCALAPPDATA%\worktree-janitor`) |
+| `-Node PATH` | `node.exe` to use (default: node on `PATH`; Node.js 18+) |
+| `-Claude` | Also set up the Claude Code plugin from the installed copy (needs `claude` on `PATH`) |
+| `-Codex` | Also set up Codex hooks, skill and `AGENTS.md` rule |
+| `-All` | Both |
+| `-None` | Neither: files and launcher only. Cannot be combined with the three above |
+| (none of the four) | One integration for each of `claude` / `codex` found on `PATH` |
+| `-Uninstall` | Remove the integrations (all unless `-Claude`, `-Codex` or `-None` narrows it), the launcher, the user `PATH` entry and the install directory |
+| `-DryRun` | Print what would happen, change nothing |
+| `-Help` | Usage |
+
+What it creates:
+
+- `<Dir>\v0.1.0\`: the release zip, unpacked only after its SHA-256 matched `SHA256SUMS`, and the junction `<Dir>\current` pointing at it.
+- `<Dir>\bin\worktree-janitor.cmd`, which runs the absolute node found at install time (falling back to node on `PATH`), plus `<Dir>\bin\worktree-janitor`, an sh launcher for Git Bash, where `.cmd` files are not found without the extension.
+- `<Dir>\bin` appended to the **user** `PATH` (HKCU, kept as `REG_EXPAND_SZ` so `%VARS%` stay unexpanded). New terminals pick it up; already open ones do not.
+- With `-Codex` or `-Claude`: the same integrations as [install.mjs](#from-a-git-clone-scriptsinstallmjs), pointing at `<Dir>\current`. Codex hooks get a `command_windows`.
+
+**Execution policy:** the two `irm` forms run the script text from memory, which the execution policy does not restrict. Running the downloaded `install.ps1` file is blocked under the `Restricted` and (for downloaded files) `RemoteSigned` policies, so pass `-ExecutionPolicy Bypass` to that one `powershell` process; nothing about your policy changes.
+
+**Verify:** in a new terminal, `worktree-janitor --help`.
+
+**Update:** run it again, with the new `-Version` or the `latest` form. The same version is not downloaded twice; a new version moves `current`, deletes the older versions it installed, and leaves Codex hook commands unchanged (no re-trust) unless the node path changed.
+
+**Uninstall:**
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/erictheng93/worktree-janitor/releases/latest/download/install.ps1))) -Uninstall
+```
+
+The user `PATH` entry is removed and the `PATH` string comes back exactly as it was. Pass `-Dir` if you installed elsewhere.
+
+### install.sh (macOS, Linux)
+
+POSIX `sh`, never sudo.
+
+```
+# a specific release, with options (recommended)
+curl -fsSL https://github.com/erictheng93/worktree-janitor/releases/download/v0.1.0/install.sh | sh -s -- --version v0.1.0 --none
+
+# the latest release
+curl -fsSL https://github.com/erictheng93/worktree-janitor/releases/latest/download/install.sh | sh
+
+# a downloaded copy
+sh install.sh --version v0.1.0 --codex
+```
+
+| Option | Effect |
+| --- | --- |
+| `--version vX.Y.Z` | Release to install (default: the latest, from the GitHub API; a clear error when there is no release) |
+| `--dir DIR` | Install root (default `~/.worktree-janitor`) |
+| `--bin-dir DIR` | Where the `worktree-janitor` launcher goes (default `~/.local/bin`) |
+| `--node PATH` | node to use (default: node on `PATH`; Node.js 18+) |
+| `--claude`, `--codex`, `--all`, `--none` | As `-Claude`, `-Codex`, `-All`, `-None` for install.ps1; default: one integration for each of `claude` / `codex` on `PATH` |
+| `--uninstall` | Remove the integrations (all unless `--claude`, `--codex` or `--none` narrows it), the launcher and the install directory |
+| `--dry-run` | Print what would happen, change nothing |
+| `-h`, `--help` | Usage |
+
+`--version=vX.Y.Z` (and the same `=` form for `--dir`, `--bin-dir`, `--node`) works too.
+
+What it creates:
+
+- `~/.worktree-janitor/v0.1.0/`: the release tarball, unpacked only after its SHA-256 matched `SHA256SUMS`, and the symlink `~/.worktree-janitor/current` pointing at it.
+- `~/.local/bin/worktree-janitor`: a launcher that runs the absolute node found at install time, falling back to node on `PATH`. `~/.local/bin` is not on `PATH` by default on macOS; the installer then prints the line to add to your profile.
+- With `--codex`: hooks in `$CODEX_HOME/hooks.json` if that file exists, else a marked block in `$CODEX_HOME/config.toml`; the skill in `~/.agents/skills/clean-worktrees`; a rule in `$CODEX_HOME/AGENTS.md`. The hooks point at `~/.worktree-janitor/current/scripts/janitor.mjs` and try the absolute node first.
+- With `--claude`: a local marketplace at `~/.worktree-janitor/current` and the plugin (user scope).
+
+Everything in the script is inside functions called on its last line, so a truncated download runs nothing.
+
+**Verify:** `worktree-janitor --help`; `readlink ~/.worktree-janitor/current`.
+
+**Update:** run it again (latest) or with `--version`. Same version: nothing is downloaded. New version: `current` moves, the older versions it installed are deleted, Codex hook commands stay the same (no re-trust) unless the node path changed, and the Claude Code plugin is read from `current` and updated in place.
+
+**Uninstall:** the script is not inside the archive, so download it again:
+
+```
+curl -fsSL https://github.com/erictheng93/worktree-janitor/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+It removes the integrations, the launcher, and only files it created; the install directory goes when it is empty. Empty `~/.agents/skills` directories stay.
+
+**Environment** (both installers): `HTTPS_PROXY` / `https_proxy` for the downloads (never printed; install.ps1 passes credentials in the URL as a `PSCredential`), `WORKTREE_JANITOR_BASE_URL` (a mirror of the release assets: an https URL, a `file://` URL or a local directory), `WORKTREE_JANITOR_API_URL` (the latest-release endpoint), and for install.ps1 `WORKTREE_JANITOR_NO_USER_PATH=1` (do not touch the user `PATH`).
+
+### Homebrew
+
+macOS and Linux (Homebrew on Linux). The formula lives in this repository (`Formula/worktree-janitor.rb`); there is no separate tap repository, so the tap needs the explicit URL:
+
+```
+brew tap erictheng93/worktree-janitor https://github.com/erictheng93/worktree-janitor
+brew trust erictheng93/worktree-janitor
+brew install erictheng93/worktree-janitor/worktree-janitor
+```
+
+**`brew trust`.** Current Homebrew refuses to load a formula from a third-party tap until the tap is trusted: "Refusing to load formula erictheng93/worktree-janitor/worktree-janitor from untrusted tap erictheng93/worktree-janitor. Run `brew trust --formula erictheng93/worktree-janitor/worktree-janitor` or `brew trust erictheng93/worktree-janitor` to trust it." `--formula` trusts only that one formula. Older Homebrew has no `brew trust` command ("Unknown command: brew trust") and needs no such step. In a script: `brew commands --quiet | grep -qx trust && brew trust erictheng93/worktree-janitor`.
+
+The formula installs into `libexec`, depends on Homebrew's `node`, and its `bin/worktree-janitor` wrapper runs `$(brew --prefix)/opt/node/bin/node` by absolute path, so it works without node on `PATH`. Homebrew installs the release the formula points to; `brew pin worktree-janitor` holds it there.
+
+It never writes Claude Code or Codex settings. `brew info worktree-janitor` shows caveats with the plugin commands and, for Codex hooks that run the Homebrew copy:
+
+```
+$(brew --prefix)/opt/node/bin/node $(brew --prefix)/opt/worktree-janitor/libexec/scripts/install.mjs --codex --node $(brew --prefix)/opt/node/bin/node
+```
+
+Those hooks point at the `opt/` path, so they survive `brew upgrade`. Run the same command with `--uninstall` added before `brew uninstall`.
+
+**Verify:** `worktree-janitor --help`; `brew test worktree-janitor`.
+
+**Update:** `brew update && brew upgrade worktree-janitor`.
+
+**Uninstall:** `brew uninstall worktree-janitor && brew untap erictheng93/worktree-janitor`.
+
+### Release archives
+
+Every release on the [releases page](https://github.com/erictheng93/worktree-janitor/releases) has:
+
+| Asset | Content |
+| --- | --- |
+| `worktree-janitor-vX.Y.Z.tar.gz` | The runtime files (scripts, hooks, skills, plugin manifests, integrations, docs), under `worktree-janitor-vX.Y.Z/` |
+| `worktree-janitor-vX.Y.Z.zip` | The same, for Windows |
+| `install.sh`, `install.ps1` | The installers |
+| `SHA256SUMS` | SHA-256 of each of the four files above |
+
+Each asset also has a GitHub build provenance attestation. The release workflow builds the assets twice and requires byte-identical results before publishing.
+
+Download with a browser or `gh release download v0.1.0 -R erictheng93/worktree-janitor`, then verify:
+
+```
+# Linux
+grep ' worktree-janitor-v0.1.0.tar.gz$' SHA256SUMS | sha256sum -c -
+# macOS
+grep ' worktree-janitor-v0.1.0.tar.gz$' SHA256SUMS | shasum -a 256 -c -
+# provenance, any OS (needs gh)
+gh attestation verify worktree-janitor-v0.1.0.tar.gz -R erictheng93/worktree-janitor
+```
+
+```powershell
+# Windows PowerShell 5.1 or 7: prints True when the hash matches
+$f = 'worktree-janitor-v0.1.0.zip'
+$want = ((Get-Content SHA256SUMS) | Where-Object { $_.EndsWith("  $f") }).Split(' ')[0]
+(Get-FileHash $f -Algorithm SHA256).Hash -eq $want
+Expand-Archive $f -DestinationPath .
+```
+
+Unpack it anywhere and run `node worktree-janitor-v0.1.0/scripts/janitor.mjs`, or set up hooks with its `scripts/install.mjs` (next section); the hooks then point at that directory, so keep it in place.
+
+### From a git clone: scripts/install.mjs
+
+The installer works from a clone (or an unpacked release archive) and points everything at **that directory's** `scripts/janitor.mjs`, so keep it where it is (moving it means reinstalling). `install.sh` and `install.ps1` run this same script from `<dir>/current`.
 
 ```
 git clone https://github.com/erictheng93/worktree-janitor.git
@@ -151,11 +365,13 @@ node scripts/install.mjs --all --dry-run
 
 | Flag | Effect |
 | --- | --- |
-| `--claude` | Claude Code: adds this clone as the local marketplace `worktree-janitor-marketplace` and installs the plugin at user scope, through the `claude` CLI. Only missing steps run. Skipped with a message when `claude` is not on `PATH` |
-| `--codex` | Codex CLI: hooks, skill and an `AGENTS.md` rule (below) |
+| `--claude` | Claude Code: adds this directory as the local marketplace `worktree-janitor-marketplace` and installs the plugin at user scope, through the `claude` CLI. Only missing steps run. Skipped with a message when `claude` is not on `PATH` |
+| `--codex` | Codex: hooks, skill and an `AGENTS.md` rule (below) |
 | `--all` | Both `--claude` and `--codex` |
 | `--uninstall` | Removes what the installer added, and nothing else |
 | `--dry-run` | Prints every planned change and writes nothing |
+| `--root <dir>` | The worktree-janitor directory the hooks and the marketplace point at (default: the one the script is in, as started, symlinks not resolved) |
+| `--node <path>` | Absolute path of the node the Codex hooks try first (default: the node running the installer); node on `PATH` and the usual install locations are the fallbacks |
 | `-h`, `--help` | Usage |
 
 Without `--claude`, `--codex` or `--all` it prints usage and exits 2.
@@ -169,7 +385,7 @@ What `--codex` writes (`$CODEX_HOME` defaults to `~/.codex`):
 | `~/.agents/skills/clean-worktrees/SKILL.md` and `agents/openai.yaml` | The `$clean-worktrees` skill, explicit invocation only |
 | `$CODEX_HOME/AGENTS.md` | A marked rule telling Codex never to run `git worktree remove` directly and to use the janitor instead |
 
-Codex merges `hooks.json` with inline `[hooks]` tables but warns at every session start when one config layer uses both, so the installer keeps to the one you already have.
+Each hook has a `command` (macOS/Linux) and a `command_windows` that try the `--node` path first, then the same fallbacks as the [Codex plugin](#codex-plugin). Codex merges `hooks.json` with inline `[hooks]` tables but warns at every session start when one config layer uses both, so the installer keeps to the one you already have.
 
 Behavior details:
 
@@ -177,11 +393,12 @@ Behavior details:
 - Before its first change to an existing file, it saves the original bytes as `<file>.worktree-janitor.bak` (once). Uninstall restores those exact bytes when nothing else changed in the file, deletes files it created, and removes the backups.
 - Tables that Codex itself inserts inside the marked block (hook trust entries) are preserved on reinstall and on uninstall.
 - It refuses, without writing, when `hooks.json` is not valid JSON, when `config.toml` already defines hooks as a static array (`SessionStart = [...]` or `hooks = {...}`; adding tables would make it invalid TOML), when a `clean-worktrees` skill exists that it did not install, or when the marked block was edited by hand.
-- `--claude` refuses when a marketplace named `worktree-janitor-marketplace` already points at a different clone; run `--claude --uninstall` from that clone first.
+- `--codex` warns when the worktree-janitor Codex plugin is also enabled: the hooks would run twice.
+- `--claude` skips, changing nothing, when a marketplace named `worktree-janitor-marketplace` already comes from somewhere else (the GitHub marketplace or another directory); remove that one first if you want this directory instead. When the installed plugin's version differs from this directory's, it refreshes the marketplace and updates the plugin. `--claude --uninstall` likewise keeps a plugin that came from another source.
 - On Windows the hook command quotes the path with double quotes, or with single quotes when the path contains `$`, a backtick, `"` or a typographic quote (Codex runs hook commands in PowerShell on Windows and in `sh` elsewhere).
 - Exit code: 0 on success, 1 if any step failed, 2 for a usage error.
 
-After `--codex`, start Codex and trust the two hooks (startup prompt or `/hooks`). A changed hook command, for example after reinstalling from another path, has to be trusted again.
+After `--codex`, start Codex and trust the two hooks (startup prompt or `/hooks`). A changed hook command, for example after reinstalling from another path or with another node, has to be trusted again.
 
 ### Manual Codex setup with the templates
 
@@ -194,12 +411,14 @@ Use one of the two files, not both, and then trust the hooks in Codex.
 
 ### Plain CLI
 
-No installation is needed: clone the repository (or copy `scripts/janitor.mjs`, which has no dependencies) and run it with Node.js 18+ or Bun:
+No installation is needed: clone the repository, unpack a release archive (or copy `scripts/janitor.mjs`, which has no dependencies) and run it with Node.js 18+ or Bun:
 
 ```
 node scripts/janitor.mjs --repo /path/to/repo
 bun scripts/janitor.mjs --repo /path/to/repo
 ```
+
+The `worktree-janitor` command from install.sh, install.ps1 or Homebrew is the same script with the same arguments.
 
 To wire it into another tool's hooks, call `node /path/to/janitor.mjs --hook session-start` or `--hook post-tool-use` and pass the payload described in [Hook modes](#hook-modes) on stdin.
 
@@ -456,7 +675,11 @@ In hook mode the one-line summary always mentions a partial removal (`PARTIAL re
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `CODEX_HOME` | `install.mjs` | Codex configuration directory (default `~/.codex`) |
+| `CODEX_HOME` | `install.mjs`, `install.sh`, `install.ps1` | Codex configuration directory (default `~/.codex`) |
+| `HTTPS_PROXY`, `https_proxy` | `install.sh`, `install.ps1` | Proxy for the downloads; never printed |
+| `WORKTREE_JANITOR_BASE_URL` | `install.sh`, `install.ps1` | Where the release assets are, instead of the GitHub release (a mirror): an https URL, a `file://` URL or a local directory |
+| `WORKTREE_JANITOR_API_URL` | `install.sh`, `install.ps1` | Latest-release endpoint, instead of the GitHub API |
+| `WORKTREE_JANITOR_NO_USER_PATH` | `install.ps1` | `1`: do not add the launcher directory to the user `PATH` |
 | `JANITOR_GH` | `janitor.mjs` | Command to run instead of `gh`, for a `gh` that is not on `PATH`. A path ending in `.js`, `.mjs` or `.cjs` is run with the current Node.js/Bun executable. The test suite points it at a fake `gh` |
 | `JANITOR_CLAUDE` | `install.mjs` | Command to run instead of the `claude` found on `PATH` (`.js`/`.mjs`/`.cjs` run with Node.js). Used by tests |
 | `JANITOR_RUNTIME` | test suite | Executable that runs `janitor.mjs` in the tests, for example `bun`. The test runner itself is always Node.js |
@@ -467,12 +690,30 @@ The janitor runs git and gh with `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`
 
 ## Platform notes
 
+### Supported platforms
+
+Exercised in CI (GitHub-hosted runners and containers):
+
+| Platform | Janitor test suite | Installers and plugins |
+| --- | --- | --- |
+| Windows Server 2022 (build 20348, Windows 10 21H2 kernel), x64 | Node.js 18, 20, 22; NTFS volume mount points | `install.ps1` under Windows PowerShell 5.1 and PowerShell 7 |
+| Windows Server 2025 (build 26100, Windows 11 24H2 kernel), x64 | Node.js 18, 20, 22; NTFS volume mount points and Dev Drive | `install.ps1` under 5.1 and 7; Claude Code and Codex plugins (real CLIs) |
+| Windows 11, arm64 | Node.js 20, 22 (no Node.js 18 build exists for it) | - |
+| macOS 15 and macOS 26, arm64 | Node.js 18, 20, 22; APFS and HFS+ disk images | macOS 15: `install.sh`, Homebrew, Claude Code and Codex plugins |
+| macOS 15, Intel | Node.js 18, 20, 22 | `install.sh` |
+| Ubuntu 24.04 (runner) | Node.js 18, 20, 22, Bun; bind mounts and tmpfs | `install.sh`, Homebrew on Linux, Claude Code and Codex plugins |
+| Debian 11 / 12, Ubuntu 20.04 / 22.04 / 24.04 (containers) | as root with the mount suite, and as a user without sudo | `install.sh` without sudo on Debian 12 |
+| Rocky Linux 8 / 9, AlmaLinux 8, RHEL UBI 8 / 9, CentOS Stream 9 / 10 (containers) | as root with the mount suite, and as a user without sudo | `install.sh` without sudo on Rocky Linux 9 |
+| CentOS 7 | unsupported: git 1.8.3 has no `git worktree`. A manual run exits 1 with `git 2.7 or newer is required`, a hook exits 0 silently, nothing is deleted | - |
+
+Each container uses its distribution's own git (2.25.1 to 2.52), util-linux and, where it is 18 or newer, its own Node.js. The containers share the Ubuntu runner's kernel, so SELinux is not enforcing in any of them: the Red Hat images exercise RHEL userland, not RHEL's kernel or SELinux policy. The mount tests use real mounts and fail CI if they would be skipped: VHDX volumes mounted on a directory (Windows), `hdiutil` disk images (macOS), `mount --bind` and tmpfs (Linux), each checked to leave the mounted data intact.
+
 ### Windows
 
 - **Junctions:** Node.js and Bun report NTFS junctions as symbolic links. A directory that still answers `readlink` is treated as a link too. Links are removed with unlink, then `rmdir` (without `/s`), then `cmd /c rmdir` as a last resort; each of these removes the link only.
 - **Long paths:** all file operations use `\\?\` paths, so worktrees nested deeper than `MAX_PATH` (260 characters), common with `node_modules`, are deleted correctly.
 - **Case:** paths are compared case-insensitively, after resolving them to their real path.
-- **Mounted volumes:** a volume mounted into a folder is expected not to be reported as a link, so the device-ID check is what catches it (unverified, see [Known limitations](#known-limitations)).
+- **Mounted volumes:** a volume mounted into a folder (NTFS, ReFS or a Dev Drive) is not reported as a link by `lstat`, but its device ID differs from the worktree's, so the device-ID check keeps the worktree as `contains mount point`. Verified in CI with VHDX volumes on Windows Server 2022 and 2025.
 - **Files in use:** Windows cannot delete a file another process holds open, or a directory that is some process's current directory; either stops the deletion (`partial`).
 - **PowerShell 5.1** adds a BOM to piped stdin; it is stripped.
 - **File symlinks** in a checkout need Developer Mode or admin rights, and git checks them out as plain text files when `core.symlinks=false`. Junctions need no privileges.
@@ -482,7 +723,7 @@ The janitor runs git and gh with `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`
 
 - `/var` and `/tmp` are symlinks into `/private`. git prints real paths, hook payloads may not, so every comparison resolves real paths first; a path that no longer exists is resolved through its nearest existing parent.
 - APFS is case-insensitive by default but can be case-sensitive, so paths are compared exactly after resolving them, with a device and inode comparison as a second check. A false match only ever keeps a worktree.
-- The device-ID check detects mounted volumes; there is no mountinfo.
+- The device-ID check detects mounted volumes; there is no mountinfo. Verified in CI with APFS and HFS+ disk images attached inside a worktree.
 
 ### Linux
 
@@ -504,17 +745,20 @@ The janitor runs git and gh with `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`
 | `install.mjs --claude` | `node scripts/install.mjs --claude --uninstall` (from the same clone) |
 | `install.mjs --codex` | `node scripts/install.mjs --codex --uninstall` (add `--dry-run` first to preview) |
 | Manual Codex setup | `node scripts/install.mjs --codex --uninstall` if you used the `config.toml` template with its markers; otherwise delete the two hook groups by hand |
-| Plain CLI | Delete the clone |
+| `install.ps1` (Windows) | `& ([scriptblock]::Create((irm https://github.com/erictheng93/worktree-janitor/releases/latest/download/install.ps1))) -Uninstall` |
+| `install.sh` (macOS, Linux) | `curl -fsSL https://github.com/erictheng93/worktree-janitor/releases/latest/download/install.sh \| sh -s -- --uninstall` |
+| Homebrew | `brew uninstall worktree-janitor && brew untap erictheng93/worktree-janitor` (first remove Codex hooks you added from `brew info` with `--codex --uninstall`) |
+| Plain CLI, release archive | Delete the clone or the unpacked directory |
 
-The installer's uninstall leaves a `worktree-janitor-marketplace` that points at a different clone untouched, and reports it.
+The installers' uninstall leaves a `worktree-janitor-marketplace` that comes from somewhere else (the GitHub marketplace or another directory) untouched, and reports it.
 
 ## Troubleshooting
 
 ### The hooks do not run
 
-- **Codex: hooks not trusted.** Open `/hooks` and trust both worktree-janitor hooks. `codex exec` skips untrusted hooks silently. After reinstalling from a different path the command changed and must be trusted again.
+- **Codex: hooks not trusted.** Open `/hooks` (desktop app: Settings > Hooks) and trust both worktree-janitor hooks. `codex exec` skips untrusted hooks silently. After every plugin update, and after reinstalling installer hooks from a different path or with a different node, they must be trusted again.
 - **Plugin not enabled.** `claude plugin list` or `codex plugin list` should show it installed and enabled. Restart the agent after installing.
-- **`node` not on `PATH`.** The hooks run `node`. Check `node --version` in the environment the agent starts from (a GUI-launched agent may not see your shell's `PATH`).
+- **`node` not on `PATH` (Claude Code).** The Claude Code plugin's hooks run `node` by name. Check `node --version` in the environment the agent starts from: the desktop app launched from the Dock or the Start menu may not see your shell's `PATH` ([Claude Code plugin](#claude-code-plugin)). Codex hooks search the usual install locations as well, but nvm, asdf, mise and `n` installs only through `PATH`.
 - **`post-tool-use` did nothing.** By design it acts only when the shell command contains `gh pr merge`. Merges made in the browser or another tool are picked up at the next session start.
 - **Nothing printed.** The hooks are silent unless something was removed. Run `node scripts/janitor.mjs --repo <repo>` to see the full report.
 
@@ -534,7 +778,7 @@ See [partial](#partial).
 
 ### Duplicate summaries
 
-If each summary appears twice in Codex, both the plugin and the installer are active. Remove one of them ([Uninstall](#uninstall)).
+If each summary appears twice in Codex, both the plugin and installer hooks (from `install.sh`, `install.ps1`, `install.mjs` or Homebrew's `brew info` command) are active. Remove one of them ([Uninstall](#uninstall)).
 
 ## FAQ
 
@@ -564,8 +808,14 @@ No. Hooks always exit 0, stop after about 20 seconds (the hook timeout is 30), a
 
 ## Known limitations
 
-- **macOS** is verified only through CI (GitHub-hosted macOS runners), not on a physical machine.
-- **Windows volume mount points** (a drive mounted into an NTFS folder) are expected to be caught by the device-ID check, but this has not been verified.
+- **Physical machines:** every platform is verified through CI (GitHub-hosted runners and containers), not on physical hardware.
+- **SELinux** in enforcing mode is not exercised; the RHEL-family containers run on the Ubuntu runner's kernel.
+- **git older than 2.7** (CentOS 7 ships 1.8.3) is refused. The oldest git exercised is 2.25.1.
+- **Claude Code plugin hooks need `node` on the Claude Code process's `PATH`**; a desktop app launched from the Dock or the Start menu may not have it. A `userConfig` option for the node path was rejected: Claude Code never applies a default for hooks, so every user would have to set it before the hooks work.
+- **Codex hook fallbacks** cover `PATH`, Homebrew, Volta and fnm; nvm, asdf, mise and `n` only through `PATH` (installer hooks also try the absolute node recorded at install time). If neither PowerShell is present on Windows, Codex falls back to `cmd.exe /c`, which cannot run `command_windows`.
+- **Codex plugin hooks must be re-trusted after every plugin update** (Codex hashes all plugin files); installer hooks only when the command text changes.
+- **`install.sh --uninstall`** needs the script downloaded again; it is not part of the installed files.
+- **Homebrew installs whatever release the formula points to**; there is no per-version formula. Use `brew pin` to stay on a release.
 - **btrfs subvolumes, overlayfs and similar** can report a different device ID for directories on the same filesystem. Such a worktree is kept as `contains mount point`: a false positive, but a safe one.
 - **Fast-forward merges** leave nothing in git history that distinguishes them from a fresh branch; they are detected only through `gh`.
 - **Branches that contain their own merge commits** (for example after merging the base into the branch) may not be recognized by `git cherry`; they need `gh`.
