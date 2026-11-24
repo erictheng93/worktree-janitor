@@ -159,8 +159,10 @@ jobs:
           set -eu
           # The real tap layout: this repository, Formula/ at the root.
           brew tap erictheng93/worktree-janitor "$GITHUB_WORKSPACE"
-          # Homebrew refuses formulae from a third-party tap until it is trusted.
-          brew trust erictheng93/worktree-janitor
+          # Newer Homebrew refuses formulae from a third-party tap until it is
+          # trusted; older versions have no `brew trust` and need nothing.
+          trust() { if brew commands --quiet | grep -qx trust; then brew trust "$1"; else echo "no brew trust in this Homebrew"; fi; }
+          trust erictheng93/worktree-janitor
           brew info erictheng93/worktree-janitor/worktree-janitor
           brew style erictheng93/worktree-janitor/worktree-janitor
           brew audit --strict erictheng93/worktree-janitor/worktree-janitor
@@ -169,7 +171,7 @@ jobs:
         run: |
           set -eu
           brew tap-new --no-git local/wjtest
-          brew trust local/wjtest
+          if brew commands --quiet | grep -qx trust; then brew trust local/wjtest; fi
           TAP=$(brew --repository local/wjtest)
           node scripts/update-formula.mjs --sums dist/SHA256SUMS --url "file://$PWD/$(ls dist/worktree-janitor-v*.tar.gz)" --out "$TAP/Formula/worktree-janitor.rb"
           grep -E '^  (url|sha256) ' "$TAP/Formula/worktree-janitor.rb"
