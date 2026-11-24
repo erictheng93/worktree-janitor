@@ -225,15 +225,15 @@ describe('install.mjs', { concurrency: 4 }, () => {
     assert.equal(fs.existsSync(sb.config), false);
   });
 
-  test('claude: fake CLI, install twice is idempotent, uninstall reverses; missing CLI is skipped', () => {
-    const sb = sandbox();
+  // A fake `claude` CLI keeping its state in a JSON file; `initial` seeds it.
+  const fakeClaude = (sb, initial = { markets: [], plugins: [], calls: [] }) => {
     const state = path.join(sb.dir, 'claude-state.json');
     const fake = path.join(sb.dir, 'fake-claude.mjs');
     fs.writeFileSync(
       fake,
       `import fs from 'node:fs';
 const f = ${JSON.stringify(state)};
-const s = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : { markets: [], plugins: [], calls: [] };
+const s = JSON.parse(fs.readFileSync(f, 'utf8'));
 const a = process.argv.slice(2);
 const k = a.join(' ');
 let out = '';
@@ -243,6 +243,8 @@ else {
   s.calls.push(k);
   if (a[1] === 'marketplace' && a[2] === 'add') s.markets.push({ name: 'worktree-janitor-marketplace', source: 'directory', path: a[3] });
   else if (a[1] === 'install') s.plugins.push({ id: a[2], scope: 'user' });
+  else if (a[1] === 'update') s.plugins.forEach((p) => { if (p.id === a[2]) p.version = 'updated'; });
+  else if (a[1] === 'marketplace' && a[2] === 'update') {}
   else if (a[1] === 'uninstall') s.plugins = s.plugins.filter((p) => p.id !== a[2]);
   else if (a[1] === 'marketplace' && a[2] === 'remove') s.markets = s.markets.filter((m) => m.name !== a[3]);
   else process.exit(3);
@@ -251,7 +253,13 @@ fs.writeFileSync(f, JSON.stringify(s));
 process.stdout.write(out);
 `,
     );
-    const env = { JANITOR_CLAUDE: fake };
+    fs.writeFileSync(state, JSON.stringify(initial));
+    return { state, env: { JANITOR_CLAUDE: fake } };
+  };
+
+  test('claude: fake CLI, install twice is idempotent, uninstall reverses; missing CLI is skipped', () => {
+    const sb = sandbox();
+    const { state, env } = fakeClaude(sb);
     let r = install(sb, ['--claude'], env);
     assert.equal(r.code, 0, r.stderr);
     r = install(sb, ['--claude'], env);
@@ -269,6 +277,28 @@ process.stdout.write(out);
     r = install(sb, ['--claude'], { PATH: empty, Path: empty });
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /skipped: `claude` is not on PATH/);
+  });
+
+  test('claude: a marketplace from another channel (GitHub) is left alone on install and uninstall', () => {
+    const sb = sandbox();
+    const github = { name: 'worktree-janitor-marketplace', source: 'github', repo: 'erictheng93/worktree-janitor', installLocation: path.join(sb.home, 'm') };
+    const { state, env } = fakeClaude(sb, { markets: [github], plugins: [{ id: 'worktree-janitor@worktree-janitor-marketplace', scope: 'user', version: '0.0.1' }], calls: [] });
+    let r = install(sb, ['--claude'], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /skipped: marketplace worktree-janitor-marketplace already comes from erictheng93\/worktree-janitor/);
+    r = install(sb, ['--claude', '--uninstall'], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /kept worktree-janitor@worktree-janitor-marketplace/);
+    assert.deepEqual(JSON.parse(read(state)).calls, [], 'no claude command that changes anything');
+  });
+
+  test('claude: an older plugin version from this directory is updated', () => {
+    const sb = sandbox();
+    const local = { name: 'worktree-janitor-marketplace', source: 'directory', path: REPO };
+    const { state, env } = fakeClaude(sb, { markets: [local], plugins: [{ id: 'worktree-janitor@worktree-janitor-marketplace', scope: 'user', version: '0.0.1' }], calls: [] });
+    const r = install(sb, ['--claude'], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(JSON.parse(read(state)).calls, ['plugin marketplace update worktree-janitor-marketplace', 'plugin update worktree-janitor@worktree-janitor-marketplace --scope user']);
   });
 
   test('quoting: double quotes by default, single quotes when the path needs them', () => {

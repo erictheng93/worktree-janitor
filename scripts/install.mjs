@@ -501,9 +501,27 @@ function claudeJson(args) {
   }
 }
 
+// Same directory, as written or once symlinks/junctions are resolved (the
+// claude CLI may store either form of <dir>/current).
 const samePathLoose = (a, b) => {
+  if (!a || !b) return false;
   const n = (p) => (IS_WIN ? path.resolve(p).toLowerCase() : path.resolve(p));
-  return !!a && !!b && n(a) === n(b);
+  const real = (p) => {
+    try {
+      return fs.realpathSync.native(p);
+    } catch {
+      return p;
+    }
+  };
+  return n(a) === n(b) || n(real(a)) === n(real(b));
+};
+
+const localPluginVersion = () => {
+  try {
+    return String(JSON.parse(fs.readFileSync(path.join(REPO_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version || '');
+  } catch {
+    return '';
+  }
 };
 
 function installClaude(plan, uninstall) {
@@ -526,20 +544,35 @@ function installClaude(plan, uninstall) {
     if (!r.ok) throw new Error(`claude ${args.join(' ')} failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] || 'unknown error'}`);
   };
 
+  const where = market ? market.path || market.repo || market.url || market.installLocation || 'another source' : '';
   if (uninstall) {
+    // Only what this copy set up: a plugin installed from the GitHub
+    // marketplace (or another checkout) belongs to that channel.
+    if (market && !marketHere) {
+      log(`  kept ${CLAUDE_PLUGIN} and marketplace ${CLAUDE_MARKETPLACE}: they come from ${where}, not ${REPO_ROOT}`);
+      return;
+    }
     if (plugin) step(['plugin', 'uninstall', CLAUDE_PLUGIN, '--scope', 'user'], 'remove plugin');
     else log(`  ok: ${CLAUDE_PLUGIN} not installed`);
     if (market && marketHere) step(['plugin', 'marketplace', 'remove', CLAUDE_MARKETPLACE], 'remove marketplace');
-    else if (market) log(`  kept marketplace ${CLAUDE_MARKETPLACE}: it points at ${market.path || market.installLocation}, not this checkout`);
     return;
   }
   if (market && !marketHere) {
-    throw new Error(`marketplace ${CLAUDE_MARKETPLACE} already points at ${market.path || market.installLocation}; run --claude --uninstall from that checkout first`);
+    // Already set up through another channel (e.g. the GitHub marketplace);
+    // installing a second copy would make the hooks run twice.
+    log(`  skipped: marketplace ${CLAUDE_MARKETPLACE} already comes from ${where}; Claude Code uses that copy. To use ${REPO_ROOT} instead, remove it first: claude plugin marketplace remove ${CLAUDE_MARKETPLACE}`);
+    return;
   }
   if (!market) step(['plugin', 'marketplace', 'add', REPO_ROOT], 'add local marketplace');
   else log(`  ok: marketplace ${CLAUDE_MARKETPLACE} -> ${REPO_ROOT}`);
+  const want = localPluginVersion();
   if (!plugin) step(['plugin', 'install', CLAUDE_PLUGIN, '--scope', 'user'], 'install plugin');
-  else log(`  ok: ${CLAUDE_PLUGIN} installed (user scope)`);
+  else if (want && plugin.version && plugin.version !== want) {
+    // A new release under the same <dir>/current: refresh the marketplace,
+    // then move the cached plugin copy to the new version.
+    if (market) step(['plugin', 'marketplace', 'update', CLAUDE_MARKETPLACE], 'refresh marketplace');
+    step(['plugin', 'update', CLAUDE_PLUGIN, '--scope', 'user'], `update plugin ${plugin.version} -> ${want}`);
+  } else log(`  ok: ${CLAUDE_PLUGIN} installed (user scope)`);
 }
 
 // ---------------------------------------------------------------- main
