@@ -532,6 +532,26 @@ describe('worktree-janitor', { concurrency: 6 }, () => {
     assert.equal(wtEntry(json, wt).action, 'removed');
   });
 
+  test('worktree with a populated submodule is kept, as git worktree remove would refuse it', async () => {
+    const r = await makeRepo();
+    const wt = await addWorktree(r, 'withsub');
+    await git(wt, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', r.origin, 'sub');
+    await git(wt, 'commit', '-q', '-m', 'add submodule');
+    await commitFile(r.main, 'base-withsub.txt', 'base\n');
+    await git(r.main, 'merge', '-q', '--no-ff', '-m', 'Merge withsub', 'withsub');
+    await git(r.main, 'push', '-q', 'origin', 'main');
+    assert.equal(await git(wt, 'status', '--porcelain'), '');
+    const { json } = await runJson(r, ['--apply']);
+    assert.equal(wtEntry(json, wt).action, 'kept', wtEntry(json, wt).reason);
+    assert.match(wtEntry(json, wt).reason, /populated submodule sub/);
+    assert.ok(fs.existsSync(path.join(wt, 'sub', 'README.md')));
+    // Deinit empties the checkout but its object store stays in the admin dir.
+    await git(wt, 'submodule', 'deinit', '-q', '-f', 'sub');
+    const again = await runJson(r, ['--apply']);
+    assert.equal(wtEntry(again.json, wt).action, 'kept', wtEntry(again.json, wt).reason);
+    assert.match(wtEntry(again.json, wt).reason, /submodule git dirs/);
+  });
+
   test('POSIX symlinks: tracked file symlink, ignored file/dir symlinks and a dangling one are unlinked; targets intact', { skip: IS_WIN && 'file symlinks need privileges on Windows and git checks them out as text (core.symlinks=false)' }, async () => {
     const r = await makeRepo();
     const outside = path.join(r.dir, 'outside');

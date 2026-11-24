@@ -424,6 +424,27 @@ function safeRemoveTree(p) {
   }
 }
 
+// `git worktree remove` (without --force) refuses a worktree with submodules:
+// a populated gitlink in its index, or a modules/ directory in its admin dir
+// (<common-dir>/worktrees/<id>/modules), which holds the submodules' object
+// stores and would be deleted along with the registration. Same rule here.
+// -> a reason to keep the worktree, or null.
+function submoduleKeepReason(wtPath) {
+  const ls = git(['ls-files', '-s', '-z'], { cwd: wtPath });
+  if (!ls.ok) return `git ls-files failed: ${firstLine(ls.stderr)}`;
+  for (const rec of ls.stdout.split('\0')) {
+    if (!rec.startsWith('160000 ')) continue;
+    const sub = rec.slice(rec.indexOf('\t') + 1);
+    if (sub && lstatOrNull(nsPath(path.join(wtPath, sub, '.git')))) return `contains populated submodule ${sub} (git refuses to remove such worktrees)`;
+  }
+  const gd = gitOut(['rev-parse', '--git-dir'], { cwd: wtPath });
+  if (!gd) return 'could not locate the worktree git dir';
+  const admin = path.resolve(wtPath, gd);
+  const modules = lstatOrNull(nsPath(path.join(admin, 'modules')));
+  if (modules && modules.isDirectory()) return `has submodule git dirs in ${path.join(admin, 'modules')} (git refuses to remove such worktrees)`;
+  return null;
+}
+
 // ---------------------------------------------------------------- git model
 
 function parseWorktrees(text) {
@@ -647,6 +668,8 @@ function janitor(opts, ctx) {
     if (!verdict.merged) return wtReport(wt, 'kept', verdict.reason);
 
     const lockNote = wt.locked ? (staleLock ? '; stale Claude Code lock (pid not alive)' : '; lock overridden by --include-locked') : '';
+    const subKeep = submoduleKeepReason(wt.path);
+    if (subKeep) return wtReport(wt, 'kept', subKeep);
     // Mount detection comes before anything is deleted (dry run included).
     const scan = scanTree(wt.path);
     const mountKeep = mountKeepReason(wt.path, scan);
