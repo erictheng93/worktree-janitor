@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/janitor.test.mjs"
+    "test": "node --test test/janitor.test.mjs test/install.test.mjs"
   },
   "engines": {
     "node": ">=18"
