@@ -3,10 +3,11 @@
 // Node >= 18 stdlib only; Windows, macOS and Linux.
 //
 //   node scripts/install.mjs [--claude] [--codex] [--all] [--uninstall] [--dry-run]
+//                            [--root <dir>] [--node <path>]
 //
 // --claude  claude plugin marketplace add <repo> + claude plugin install (user scope)
 // --codex   user-level Codex hooks, the clean-worktrees skill and an AGENTS.md rule,
-//           all pointing at THIS checkout's scripts/janitor.mjs
+//           all pointing at THIS checkout's scripts/janitor.mjs (or --root's)
 //
 // Everything the installer writes is marked, so --uninstall removes exactly
 // that and nothing else. Codex locations: $CODEX_HOME (default ~/.codex) for
@@ -19,10 +20,28 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const IS_WIN = process.platform === 'win32';
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const SELF = fileURLToPath(import.meta.url);
+// Started as a script? Compared through realpath: started via a symlink or
+// junction (<dir>/current/...), argv[1] keeps the link while import.meta.url
+// is the resolved file.
+const realOrNull = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+};
+const IS_MAIN = !!process.argv[1] && (path.resolve(process.argv[1]) === SELF || realOrNull(path.resolve(process.argv[1])) === realOrNull(SELF));
 const fwd = (p) => p.split(path.sep).join('/');
-const JANITOR = fwd(path.join(REPO_ROOT, 'scripts', 'janitor.mjs'));
-const INSTALLER = fwd(path.join(REPO_ROOT, 'scripts', 'install.mjs'));
+// The checkout everything points at. Default: the directory the installer was
+// started from, as typed (process.argv[1] is not resolved through symlinks),
+// so running <dir>/current/scripts/install.mjs or Homebrew's opt/ path gives
+// paths that stay valid across upgrades. --root overrides it.
+let REPO_ROOT = path.resolve(IS_MAIN ? path.dirname(path.resolve(process.argv[1])) : path.dirname(SELF), '..');
+let JANITOR = fwd(path.join(REPO_ROOT, 'scripts', 'janitor.mjs'));
+let INSTALLER = fwd(path.join(REPO_ROOT, 'scripts', 'install.mjs'));
+// Absolute node recorded in the Codex hooks (first entry of the fallback chain).
+let NODE = process.execPath;
 
 const CLAUDE_MARKETPLACE = 'worktree-janitor-marketplace';
 const CLAUDE_PLUGIN = `worktree-janitor@${CLAUDE_MARKETPLACE}`;
@@ -42,6 +61,7 @@ const OWN_HOOK_RE = /janitor\.mjs['"]?\s+--hook\s+(?:session-start|post-tool-use
 const HELP = `worktree-janitor installer
 
   node scripts/install.mjs [--claude] [--codex] [--all] [--uninstall] [--dry-run]
+                           [--root <dir>] [--node <path>]
 
   --claude     Claude Code plugin (user scope), via the claude CLI
   --codex      Codex CLI: hooks in $CODEX_HOME (hooks.json if it exists, else a
@@ -50,14 +70,26 @@ const HELP = `worktree-janitor installer
   --all        both
   --uninstall  remove what this installer added (nothing else)
   --dry-run    print the planned changes, change nothing
+  --root <dir> the worktree-janitor directory the hooks and the Claude
+               marketplace point at (default: the one this script is in, as
+               started, symlinks not resolved)
+  --node <path> node executable the Codex hooks try first (default: this one,
+               ${process.execPath}); node on PATH and the usual install
+               locations are the fallbacks
 `;
 
 // ---------------------------------------------------------------- arguments
 
 function parseArgs(argv) {
-  const o = { claude: false, codex: false, uninstall: false, dryRun: false, help: false };
-  for (const a of argv) {
-    if (a === '--claude') o.claude = true;
+  const o = { claude: false, codex: false, uninstall: false, dryRun: false, help: false, root: '', node: '' };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--root' || a === '--node') {
+      if (i + 1 >= argv.length || !argv[i + 1]) throw new Error(`${a} needs a value`);
+      o[a.slice(2)] = argv[++i];
+    } else if (a.startsWith('--root=')) o.root = a.slice(7);
+    else if (a.startsWith('--node=')) o.node = a.slice(7);
+    else if (a === '--claude') o.claude = true;
     else if (a === '--codex') o.codex = true;
     else if (a === '--all') o.claude = o.codex = true;
     else if (a === '--uninstall') o.uninstall = true;
@@ -88,7 +120,53 @@ export function shellQuote(s, win = IS_WIN) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-export const hookCommand = (kind, janitor = JANITOR, win = IS_WIN) => `node ${shellQuote(janitor, win)} --hook ${kind}`;
+// ---------------------------------------------------------------- hook commands
+//
+// Codex runs `command` with `<sh|bash|zsh> -c` on macOS/Linux and
+// `commandWindows` (else `command`) with `pwsh|powershell -NoProfile
+// -Command` on Windows, stdin carrying the hook payload. Desktop apps started
+// from the Dock or Start menu often lack the PATH a terminal has, so the hook
+// does not rely on `node` being on PATH: it tries the node recorded at
+// install time, then node on PATH, then the usual install locations, and
+// exits 0 quietly when there is none (a missing node must not break the
+// session). Codex hashes the command text for hook trust, so a different
+// recorded node or janitor path means trusting the hooks again.
+
+// Fallbacks after the recorded node, POSIX: PATH, Homebrew (Apple silicon,
+// Intel), Volta, fnm's default alias (Linux and macOS data dirs).
+export const POSIX_NODE_FALLBACKS = [
+  '"$(command -v node 2>/dev/null)"',
+  '/opt/homebrew/bin/node',
+  '/usr/local/bin/node',
+  '"$HOME/.volta/bin/node"',
+  '"$HOME/.local/share/fnm/aliases/default/bin/node"',
+  '"$HOME/Library/Application Support/fnm/aliases/default/bin/node"',
+];
+
+// PowerShell single-quoted literal (also for curly single quotes, which
+// PowerShell treats as quotes too).
+export const psQuote = (s) => `'${s.replace(/['\u2018-\u201b]/g, (q) => q + q)}'`;
+
+export function posixHookCommand(kind, janitor = JANITOR, node = NODE) {
+  const cands = [...(node ? [shellQuote(node, false)] : []), ...POSIX_NODE_FALLBACKS].join(' ');
+  return `for n in ${cands}; do if [ -f "$n" ] && [ -x "$n" ]; then exec "$n" ${shellQuote(janitor, false)} --hook ${kind}; fi; done; exit 0`;
+}
+
+// No double quotes at all: Codex passes this as one argument and escapes
+// them, which Windows PowerShell 5.1 and PowerShell 7 parse differently.
+export function windowsHookCommand(kind, janitor = JANITOR, node = NODE) {
+  const cands = [
+    ...(node ? [psQuote(node)] : []),
+    '(Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)',
+    "(Join-Path $env:ProgramFiles 'nodejs\\node.exe')",
+  ].join(', ');
+  return `$n = @(${cands}) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1; if ($n) { & $n ${psQuote(janitor)} --hook ${kind}; exit $LASTEXITCODE }; exit 0`;
+}
+
+// The command for this OS (the one Codex runs here).
+export const hookCommand = (kind, janitor = JANITOR, win = IS_WIN, node = NODE) => (win ? windowsHookCommand(kind, janitor, node) : posixHookCommand(kind, janitor, node));
+
+const hookHandler = (kind, janitor, node) => ({ type: 'command', command: posixHookCommand(kind, janitor, node), commandWindows: windowsHookCommand(kind, janitor, node), timeout: 30 });
 
 // TOML basic string. JSON escapes are a subset of TOML basic-string escapes.
 const tomlString = (s) => JSON.stringify(s);
@@ -222,15 +300,18 @@ function codexPaths(env = process.env) {
   };
 }
 
-export function codexHooksObject(janitor = JANITOR, win = IS_WIN) {
+// Both commands are always written: Codex picks per OS, so the same file
+// works on every platform (and the templates in integrations/codex/ are
+// generated from this).
+export function codexHooksObject(janitor = JANITOR, node = NODE) {
   return {
-    SessionStart: [{ hooks: [{ type: 'command', command: hookCommand('session-start', janitor, win), timeout: 30 }] }],
-    PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: hookCommand('post-tool-use', janitor, win), timeout: 30 }] }],
+    SessionStart: [{ hooks: [hookHandler('session-start', janitor, node)] }],
+    PostToolUse: [{ matcher: 'Bash', hooks: [hookHandler('post-tool-use', janitor, node)] }],
   };
 }
 
-export function codexTomlBlock(janitor = JANITOR, win = IS_WIN, installer = INSTALLER) {
-  const h = codexHooksObject(janitor, win);
+export function codexTomlBlock(janitor = JANITOR, win = IS_WIN, installer = INSTALLER, node = NODE) {
+  const h = codexHooksObject(janitor, node);
   return [
     `# Added by worktree-janitor. Remove with: node ${shellQuote(installer, win)} --codex --uninstall`,
     '[[hooks.SessionStart]]',
@@ -238,6 +319,7 @@ export function codexTomlBlock(janitor = JANITOR, win = IS_WIN, installer = INST
     '[[hooks.SessionStart.hooks]]',
     'type = "command"',
     `command = ${tomlString(h.SessionStart[0].hooks[0].command)}`,
+    `command_windows = ${tomlString(h.SessionStart[0].hooks[0].commandWindows)}`,
     'timeout = 30',
     '',
     '[[hooks.PostToolUse]]',
@@ -246,6 +328,7 @@ export function codexTomlBlock(janitor = JANITOR, win = IS_WIN, installer = INST
     '[[hooks.PostToolUse.hooks]]',
     'type = "command"',
     `command = ${tomlString(h.PostToolUse[0].hooks[0].command)}`,
+    `command_windows = ${tomlString(h.PostToolUse[0].hooks[0].commandWindows)}`,
     'timeout = 30',
   ];
 }
@@ -589,6 +672,18 @@ function main(argv) {
     process.stdout.write(HELP);
     return o.help ? 0 : 2;
   }
+  if (o.root) {
+    REPO_ROOT = path.resolve(o.root);
+    JANITOR = fwd(path.join(REPO_ROOT, 'scripts', 'janitor.mjs'));
+    INSTALLER = fwd(path.join(REPO_ROOT, 'scripts', 'install.mjs'));
+  }
+  if (o.node) {
+    if (!path.isAbsolute(o.node)) {
+      process.stderr.write('install: --node must be an absolute path\n');
+      return 2;
+    }
+    NODE = o.node;
+  }
   const plan = new Plan(o.dryRun);
   let failed = false;
   for (const [on, fn] of [
@@ -607,4 +702,4 @@ function main(argv) {
   return failed ? 1 : 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = main(process.argv.slice(2));
+if (IS_MAIN) process.exitCode = main(process.argv.slice(2));

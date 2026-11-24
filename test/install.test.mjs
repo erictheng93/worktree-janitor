@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cmdQuote, shellQuote, hookCommand, codexHooksObject, codexTomlBlock } from '../scripts/install.mjs';
+import { cmdQuote, shellQuote, hookCommand, posixHookCommand, windowsHookCommand, codexHooksObject, codexTomlBlock } from '../scripts/install.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INSTALL = path.join(REPO, 'scripts', 'install.mjs');
@@ -102,7 +102,8 @@ describe('install.mjs', { concurrency: 4 }, () => {
     assert.ok(cfg.startsWith(userConfig('\r\n')), 'existing content untouched, block appended');
     assert.ok(!/[^\r]\n/.test(cfg), 'CRLF kept throughout');
     assert.ok(cfg.indexOf('echo "hello"') < cfg.indexOf('janitor.mjs'), 'user hook stays SessionStart group 0');
-    assert.ok(cfg.includes(`command = ${JSON.stringify(hookCommand('session-start', JANITOR))}`));
+    assert.ok(cfg.includes(`command = ${JSON.stringify(posixHookCommand('session-start', JANITOR, process.execPath))}`));
+    assert.ok(cfg.includes(`command_windows = ${JSON.stringify(windowsHookCommand('session-start', JANITOR, process.execPath))}`));
     assert.ok(cfg.includes('matcher = "Bash"'));
     assert.match(read(sb.agentsMd), /<!-- >>> worktree-janitor >>> -->[\s\S]*git worktree remove[\s\S]*<!-- <<< worktree-janitor <<< -->\r\n$/);
     assert.ok(read(sb.agentsMd).startsWith(userAgents('\r\n')));
@@ -308,16 +309,24 @@ process.stdout.write(out);
     assert.equal(shellQuote("C:/it's $x/j.mjs", true), "'C:/it''s $x/j.mjs'");
     assert.equal(shellQuote('/home/me/my repo/janitor.mjs', false), '"/home/me/my repo/janitor.mjs"');
     assert.equal(shellQuote("/home/o'b/$x/j.mjs", false), `'/home/o'\\''b/$x/j.mjs'`);
-    assert.equal(hookCommand('session-start', '/a b/janitor.mjs', false), 'node "/a b/janitor.mjs" --hook session-start');
+    assert.equal(hookCommand('session-start', '/a b/janitor.mjs', false, '/usr/bin/node'), posixHookCommand('session-start', '/a b/janitor.mjs', '/usr/bin/node'));
+    const posix = posixHookCommand('session-start', '/a b/janitor.mjs', '/usr/bin/node');
+    assert.ok(posix.startsWith('for n in "/usr/bin/node" "$(command -v node 2>/dev/null)" /opt/homebrew/bin/node '), posix);
+    assert.ok(posix.endsWith('; do if [ -f "$n" ] && [ -x "$n" ]; then exec "$n" "/a b/janitor.mjs" --hook session-start; fi; done; exit 0'), posix);
+    assert.ok(!posixHookCommand('session-start', '/a/j.mjs', null).includes('/usr/bin/node'), 'no recorded node: fallbacks only');
+    const win = windowsHookCommand('post-tool-use', "C:/it's/j.mjs", 'C:\\n\\node.exe');
+    assert.ok(!win.includes('"'), 'no double quotes in the PowerShell command');
+    assert.ok(win.startsWith("$n = @('C:\\n\\node.exe', (Get-Command node.exe "), win);
+    assert.ok(win.includes("{ & $n 'C:/it''s/j.mjs' --hook post-tool-use; exit $LASTEXITCODE }; exit 0"), win);
   });
 
   test('checked-in Codex templates match what the installer writes', () => {
     const J = '/path/to/worktree-janitor/scripts/janitor.mjs';
     const I = '/path/to/worktree-janitor/scripts/install.mjs';
     const json = JSON.parse(read(path.join(REPO, 'integrations', 'codex', 'hooks.json')));
-    assert.deepEqual(json, { hooks: codexHooksObject(J, false) });
+    assert.deepEqual(json, { hooks: codexHooksObject(J, null) });
     const toml = read(path.join(REPO, 'integrations', 'codex', 'config.toml'));
-    const block = ['# >>> worktree-janitor >>>', ...codexTomlBlock(J, false, I), '# <<< worktree-janitor <<<', ''].join('\n');
+    const block = ['# >>> worktree-janitor >>>', ...codexTomlBlock(J, false, I, null), '# <<< worktree-janitor <<<', ''].join('\n');
     assert.ok(toml.endsWith(block), 'config.toml template ends with the installer block');
   });
 });
@@ -336,4 +345,52 @@ describe('cmdQuote (cmd.exe argument quoting for claude.cmd)', () => {
   test('doubles embedded double quotes', () => {
     assert.equal(cmdQuote('say "hi"'), '"say ""hi"""');
   });
+});
+
+// The hook commands as the shells Codex uses actually run them: `<sh|bash|zsh>
+// -c` on POSIX, `powershell|pwsh -NoProfile -Command` on Windows, payload on
+// stdin. A fake janitor records its argv and stdin.
+describe('Codex hook commands under real shells', () => {
+  const dir = path.join(ROOT, 'shells');
+  fs.mkdirSync(dir, { recursive: true });
+  const fake = path.join(dir, "fake it's janitor.mjs").split(path.sep).join('/');
+  fs.writeFileSync(fake, "import fs from 'node:fs';\nfs.writeFileSync(process.env.WJ_OUT, JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, 'utf8') }));\n");
+  const emptyPath = path.join(dir, 'no-node-here');
+  fs.mkdirSync(emptyPath, { recursive: true });
+  const which = (exe) => (process.env.PATH || '').split(path.delimiter).some((d) => d && fs.existsSync(path.join(d, exe)));
+  const shells = process.platform === 'win32'
+    ? [['powershell.exe', ['-NoProfile', '-Command']], ['pwsh.exe', ['-NoProfile', '-Command']]].filter(([s]) => which(s))
+    : [['sh', ['-c']], ['bash', ['-c']], ['zsh', ['-c']]].filter(([s]) => which(s));
+  const payload = '{"hook_event_name":"PostToolUse","cwd":"/tmp/x","tool_input":{"command":"gh pr merge 1"},"note":"caf\u00e9"}';
+  let n = 0;
+  const run = (shell, args, cmd, env) => {
+    const out = path.join(dir, `out${++n}.json`);
+    const r = spawnSync(shell, [...args, cmd], { input: payload, encoding: 'utf8', windowsHide: true, env: { ...process.env, WJ_OUT: out, ...env } });
+    return { code: r.status, stderr: r.stderr, got: fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null };
+  };
+  const command = (node) => (process.platform === 'win32' ? windowsHookCommand('post-tool-use', fake, node) : posixHookCommand('post-tool-use', fake, node));
+  const pathVar = process.platform === 'win32' ? 'Path' : 'PATH';
+  const sysPath = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\Windows', 'System32') + path.delimiter + emptyPath : `${emptyPath}:/usr/bin:/bin`;
+
+  test('at least one shell is available', () => assert.ok(shells.length > 0));
+  for (const [shell, args] of shells) {
+    test(`${shell}: recorded node runs the janitor with the payload on stdin`, () => {
+      const r = run(shell, args, command(process.execPath), {});
+      assert.equal(r.code, 0, r.stderr);
+      assert.deepEqual(r.got && r.got.args, ['--hook', 'post-tool-use']);
+      assert.equal(r.got.stdin.replace(/^\uFEFF/, '').trim(), payload);
+    });
+    test(`${shell}: a recorded node that is gone falls back to node on PATH`, () => {
+      const r = run(shell, args, command(path.join(dir, 'gone', process.platform === 'win32' ? 'node.exe' : 'node')), { [pathVar]: path.dirname(process.execPath) + path.delimiter + sysPath });
+      assert.equal(r.code, 0, r.stderr);
+      assert.deepEqual(r.got && r.got.args, ['--hook', 'post-tool-use']);
+    });
+    test(`${shell}: no node anywhere on PATH exits 0 quietly`, () => {
+      // A node in a well-known location (Homebrew, Program Files) may still be
+      // found; either way the hook must exit 0 without noise.
+      const r = run(shell, args, command(path.join(dir, 'gone', 'node')), { [pathVar]: sysPath, HOME: emptyPath });
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.stderr.trim(), '');
+    });
+  }
 });

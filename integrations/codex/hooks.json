@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"/path/to/worktree-janitor/scripts/janitor.mjs\" --hook session-start",
+            "command": "for n in \"$(command -v node 2>/dev/null)\" /opt/homebrew/bin/node /usr/local/bin/node \"$HOME/.volta/bin/node\" \"$HOME/.local/share/fnm/aliases/default/bin/node\" \"$HOME/Library/Application Support/fnm/aliases/default/bin/node\"; do if [ -f \"$n\" ] && [ -x \"$n\" ]; then exec \"$n\" \"/path/to/worktree-janitor/scripts/janitor.mjs\" --hook session-start; fi; done; exit 0",
+            "commandWindows": "$n = @((Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source), (Join-Path $env:ProgramFiles 'nodejs\\node.exe')) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1; if ($n) { & $n '/path/to/worktree-janitor/scripts/janitor.mjs' --hook session-start; exit $LASTEXITCODE }; exit 0",
             "timeout": 30
           }
         ]
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"/path/to/worktree-janitor/scripts/janitor.mjs\" --hook post-tool-use",
+            "command": "for n in \"$(command -v node 2>/dev/null)\" /opt/homebrew/bin/node /usr/local/bin/node \"$HOME/.volta/bin/node\" \"$HOME/.local/share/fnm/aliases/default/bin/node\" \"$HOME/Library/Application Support/fnm/aliases/default/bin/node\"; do if [ -f \"$n\" ] && [ -x \"$n\" ]; then exec \"$n\" \"/path/to/worktree-janitor/scripts/janitor.mjs\" --hook post-tool-use; fi; done; exit 0",
+            "commandWindows": "$n = @((Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source), (Join-Path $env:ProgramFiles 'nodejs\\node.exe')) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1; if ($n) { & $n '/path/to/worktree-janitor/scripts/janitor.mjs' --hook post-tool-use; exit $LASTEXITCODE }; exit 0",
             "timeout": 30
           }
         ]

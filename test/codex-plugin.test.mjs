@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { codexHooksObject } from '../scripts/install.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = (...p) => JSON.parse(fs.readFileSync(path.join(REPO, ...p), 'utf8'));
@@ -17,9 +18,10 @@ test('Codex plugin: inline hooks run janitor.mjs from ${PLUGIN_ROOT}; skills poi
   // the Claude Code file, and ignores its "args" (it would run bare `node`).
   const hooks = plugin.hooks && plugin.hooks.hooks;
   assert.ok(hooks, 'hooks declared inline');
-  const cmd = (kind) => `node "\${PLUGIN_ROOT}/scripts/janitor.mjs" --hook ${kind}`;
-  assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: 'command', command: cmd('session-start'), timeout: 30 }] }]);
-  assert.deepEqual(hooks.PostToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: cmd('post-tool-use'), timeout: 30 }] }]);
+  // The same node fallback chain the installer writes (no recorded node: a
+  // plugin is installed without running our code), command for macOS/Linux,
+  // commandWindows for PowerShell, janitor path from ${PLUGIN_ROOT}.
+  assert.deepEqual(hooks, codexHooksObject('${PLUGIN_ROOT}/scripts/janitor.mjs', null));
   const skill = fs.readFileSync(path.join(REPO, plugin.skills, 'clean-worktrees', 'SKILL.md'), 'utf8');
   assert.match(skill, /^---\nname: clean-worktrees\ndescription: [^\n]+\n---\n/);
   const skillDir = path.join(REPO, plugin.skills, 'clean-worktrees');
