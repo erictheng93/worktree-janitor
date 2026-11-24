@@ -65,7 +65,8 @@ function Invoke-Installer([string[]]$InstallerArgs, [hashtable]$Env = @{}) {
 
 # Files PowerShell itself keeps under LOCALAPPDATA (startup profile cache,
 # module analysis cache) are not ours.
-function Test-Foreign($Item) { return $Item.FullName -like (Join-Path $env:LOCALAPPDATA 'Microsoft\*') }
+# gh (called by the janitor) keeps a device id under LOCALAPPDATA too.
+function Test-Foreign($Item) { return ($Item.FullName -like (Join-Path $env:LOCALAPPDATA 'Microsoft\*')) -or ($Item.FullName -like (Join-Path $env:LOCALAPPDATA 'GitHub CLI\*')) -or ($Item.FullName -like (Join-Path $HomeDir '.config\gh\*')) }
 
 function Get-Snapshot {
   $items = @(Get-ChildItem -LiteralPath $HomeDir -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { (-not $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) -and -not (Test-Foreign $_) } | Sort-Object FullName | ForEach-Object {
