@@ -4,8 +4,6 @@ English | [繁體中文](manual.zh-TW.md)
 
 This manual describes worktree-janitor 0.1.0. For a short overview see the [README](../README.md).
 
-`OWNER` in URLs and commands is the GitHub account or organization the repository is published under. Replace it with that name.
-
 ## Contents
 
 1. [Concepts](#concepts)
@@ -93,17 +91,17 @@ A **mount point** is a directory where another filesystem (or a bind mount of a 
 From GitHub (shell; the default scope is `user`, which applies to every project):
 
 ```
-claude plugin marketplace add OWNER/worktree-janitor
+claude plugin marketplace add erictheng93/worktree-janitor
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-The marketplace source can also be written as a URL, `https://github.com/OWNER/worktree-janitor`, or as the path of a local clone. One-step alternative:
+The marketplace source can also be written as a URL, `https://github.com/erictheng93/worktree-janitor`, or as the path of a local clone. One-step alternative:
 
 ```
-claude plugin install worktree-janitor --marketplace OWNER/worktree-janitor
+claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor
 ```
 
-Inside Claude Code, the same is available as `/plugin marketplace add OWNER/worktree-janitor` and `/plugin install worktree-janitor@worktree-janitor-marketplace`.
+Inside Claude Code, the same is available as `/plugin marketplace add erictheng93/worktree-janitor` and `/plugin install worktree-janitor@worktree-janitor-marketplace`.
 
 Restart Claude Code after installing. The plugin provides:
 
@@ -125,7 +123,7 @@ claude plugin update worktree-janitor@worktree-janitor-marketplace
 ### Codex CLI plugin
 
 ```
-codex plugin marketplace add OWNER/worktree-janitor
+codex plugin marketplace add erictheng93/worktree-janitor
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -146,7 +144,7 @@ Do not also run `install.mjs --codex`: both register the same hooks, so they wou
 The installer works from a clone and points everything at **that clone's** `scripts/janitor.mjs`, so keep the clone where it is (moving it means reinstalling).
 
 ```
-git clone https://github.com/OWNER/worktree-janitor.git
+git clone https://github.com/erictheng93/worktree-janitor.git
 cd worktree-janitor
 node scripts/install.mjs --all --dry-run
 ```

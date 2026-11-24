@@ -39,12 +39,10 @@ worktree-janitor 從不呼叫 `git worktree remove`。它自己刪除 worktree�
 
 ## 快速開始
 
-以下指令中的 `OWNER` 是發布此儲存庫的 GitHub 帳號或組織，請換成該名稱。
-
 ### Claude Code
 
 ```
-claude plugin marketplace add OWNER/worktree-janitor
+claude plugin marketplace add erictheng93/worktree-janitor
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -57,14 +55,14 @@ claude plugin install worktree-janitor@worktree-janitor-marketplace
 **方式 A：外掛**
 
 ```
-codex plugin marketplace add OWNER/worktree-janitor
+codex plugin marketplace add erictheng93/worktree-janitor
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
 **方式 B：安裝程式**（hook 指向你自己的 clone）
 
 ```
-git clone https://github.com/OWNER/worktree-janitor.git
+git clone https://github.com/erictheng93/worktree-janitor.git
 cd worktree-janitor
 node scripts/install.mjs --codex --dry-run   # 預覽
 node scripts/install.mjs --codex
@@ -75,7 +73,7 @@ node scripts/install.mjs --codex
 ### 其他工具或不使用代理程式
 
 ```
-git clone https://github.com/OWNER/worktree-janitor.git
+git clone https://github.com/erictheng93/worktree-janitor.git
 node worktree-janitor/scripts/janitor.mjs --repo /path/to/your/repo           # 試跑
 node worktree-janitor/scripts/janitor.mjs --repo /path/to/your/repo --apply   # 實際執行
 ```
@@ -87,8 +85,8 @@ node worktree-janitor/scripts/janitor.mjs --repo /path/to/your/repo --apply   # 
 | Worktree | 結果 |
 | --- | --- |
 | 主要 worktree，或 bare 儲存庫項目 | 保留 |
-| 被執行中的 Claude Code 程序鎖定，或被其他人鎖定 | 保留（可用 `--include-locked` 覆寫） |
-| 被已結束的 Claude Code 程序鎖定 | 鎖定已失效，繼續判斷 |
+| 被執行中的 Claude Code 處理程序鎖定，或被其他人鎖定 | 保留（可用 `--include-locked` 覆寫） |
+| 被已結束的 Claude Code 處理程序鎖定 | 鎖定已失效，繼續判斷 |
 | 資料夾已不存在 | 清除（prune）註冊資訊 |
 | Detached HEAD | 保留 |
 | 包含主要 worktree 或目前的工作目錄 | 保留 |
@@ -128,7 +126,7 @@ worktree-janitor 只與 git（以及選用的 `gh`）溝通，不讀取專案檔
 
 ## 參與貢獻
 
-歡迎到 `https://github.com/OWNER/worktree-janitor` 回報問題或送出 pull request。
+歡迎到 `https://github.com/erictheng93/worktree-janitor` 回報問題或送出 pull request。
 
 ```
 npm test

@@ -39,12 +39,10 @@ worktree-janitor never calls `git worktree remove`. It deletes the worktree itse
 
 ## Quick start
 
-`OWNER` in the commands below is the GitHub account or organization the repository is published under. Replace it with that name.
-
 ### Claude Code
 
 ```
-claude plugin marketplace add OWNER/worktree-janitor
+claude plugin marketplace add erictheng93/worktree-janitor
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -57,14 +55,14 @@ Pick **one** of the two methods. Never use both: each registers the same two hoo
 **Option A: plugin**
 
 ```
-codex plugin marketplace add OWNER/worktree-janitor
+codex plugin marketplace add erictheng93/worktree-janitor
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
 **Option B: installer** (hooks point at your own clone)
 
 ```
-git clone https://github.com/OWNER/worktree-janitor.git
+git clone https://github.com/erictheng93/worktree-janitor.git
 cd worktree-janitor
 node scripts/install.mjs --codex --dry-run   # preview
 node scripts/install.mjs --codex
@@ -75,7 +73,7 @@ Then start Codex and **trust the hooks**: Codex asks at startup, or open `/hooks
 ### Any other tool, or no agent
 
 ```
-git clone https://github.com/OWNER/worktree-janitor.git
+git clone https://github.com/erictheng93/worktree-janitor.git
 node worktree-janitor/scripts/janitor.mjs --repo /path/to/your/repo           # dry run
 node worktree-janitor/scripts/janitor.mjs --repo /path/to/your/repo --apply   # act
 ```
@@ -128,7 +126,7 @@ worktree-janitor only talks to git (and optionally `gh`). It does not read proje
 
 ## Contributing
 
-Issues and pull requests are welcome at `https://github.com/OWNER/worktree-janitor`.
+Issues and pull requests are welcome at `https://github.com/erictheng93/worktree-janitor`.
 
 ```
 npm test

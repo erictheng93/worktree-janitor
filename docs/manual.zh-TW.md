@@ -4,8 +4,6 @@
 
 本手冊說明 worktree-janitor 0.1.0。簡短介紹請見 [README](../README.zh-TW.md)。
 
-網址與指令中的 `OWNER` 是發布此儲存庫的 GitHub 帳號或組織，請換成該名稱。
-
 ## 目錄
 
 1. [概念](#概念)
@@ -93,17 +91,17 @@ git worktree 是附加在同一個儲存庫上的額外工作目錄（`git workt
 從 GitHub 安裝（在 shell 中執行；預設範圍為 `user`，對所有專案生效）：
 
 ```
-claude plugin marketplace add OWNER/worktree-janitor
+claude plugin marketplace add erictheng93/worktree-janitor
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-marketplace 來源也可以寫成網址 `https://github.com/OWNER/worktree-janitor`，或本機 clone 的路徑。一步完成的寫法：
+marketplace 來源也可以寫成網址 `https://github.com/erictheng93/worktree-janitor`，或本機 clone 的路徑。一步完成的寫法：
 
 ```
-claude plugin install worktree-janitor --marketplace OWNER/worktree-janitor
+claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor
 ```
 
-在 Claude Code 中也可以使用 `/plugin marketplace add OWNER/worktree-janitor` 與 `/plugin install worktree-janitor@worktree-janitor-marketplace`。
+在 Claude Code 中也可以使用 `/plugin marketplace add erictheng93/worktree-janitor` 與 `/plugin install worktree-janitor@worktree-janitor-marketplace`。
 
 安裝後請重新啟動 Claude Code。外掛提供：
 
@@ -125,7 +123,7 @@ claude plugin update worktree-janitor@worktree-janitor-marketplace
 ### Codex CLI 外掛
 
 ```
-codex plugin marketplace add OWNER/worktree-janitor
+codex plugin marketplace add erictheng93/worktree-janitor
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -146,7 +144,7 @@ codex plugin add worktree-janitor@worktree-janitor-marketplace
 安裝程式在 clone 中執行，所有設定都指向**該 clone** 的 `scripts/janitor.mjs`，所以請把 clone 留在原處（搬移後需重新安裝）。
 
 ```
-git clone https://github.com/OWNER/worktree-janitor.git
+git clone https://github.com/erictheng93/worktree-janitor.git
 cd worktree-janitor
 node scripts/install.mjs --all --dry-run
 ```
@@ -411,7 +409,7 @@ Worktree，依檢查執行順序排列：
 | --- | --- | --- |
 | `main worktree` | 儲存庫的主要 checkout | 不需處理；永遠不會被移除 |
 | `bare repository entry` | bare 儲存庫本身 | 不需處理 |
-| `locked by a live Claude Code process (pid N)` | 執行中的 Claude Code 工作階段或子代理正在使用 | 等它結束；程序結束後就會被清理 |
+| `locked by a live Claude Code process (pid N)` | 執行中的 Claude Code 工作階段或子代理正在使用 | 等它結束；處理程序結束後就會被清理 |
 | `locked: <reason>` / `locked` | 被使用者或其他工具鎖定 | `git worktree unlock <path>`，或加上 `--include-locked` 執行 |
 | `detached HEAD (externally managed)` | 沒有 checkout 任何分支 | 不再需要的話請自行移除 |
 | `contains the main worktree` | 主要 worktree 位於其中 | 不需處理；永遠不會被移除 |
@@ -475,7 +473,7 @@ janitor 執行 git 與 gh 時會設定 `GIT_TERMINAL_PROMPT=0`、`GH_PROMPT_DISA
 - **長路徑：** 所有檔案操作都使用 `\\?\` 路徑，所以深度超過 `MAX_PATH`（260 個字元）的 worktree（`node_modules` 很常見）也能正確刪除。
 - **大小寫：** 路徑先解析為實際路徑，再以不分大小寫的方式比較。
 - **掛載的磁碟區：** 掛載到資料夾的磁碟區預期不會被回報為連結，因此靠裝置 ID 檢查來偵測（未經驗證，見[已知限制](#已知限制)）。
-- **使用中的檔案：** Windows 無法刪除被其他程序開啟的檔案，也無法刪除某個程序的目前目錄；兩者都會讓刪除停止（`partial`）。
+- **使用中的檔案：** Windows 無法刪除被其他處理程序開啟的檔案，也無法刪除某個處理程序的目前目錄；兩者都會讓刪除停止（`partial`）。
 - **PowerShell 5.1** 會在管線輸入的 stdin 加上 BOM；janitor 會去除它。
 - checkout 中的**檔案 symlink** 需要開發人員模式或系統管理員權限，且 `core.symlinks=false` 時 git 會把它們 checkout 成一般文字檔。junction 不需要特殊權限。
 - Codex 透過 `powershell.exe -NoProfile -Command` 執行 hook 指令；安裝程式的引號處理已考慮這點。
@@ -490,7 +488,7 @@ janitor 執行 git 與 gh 時會設定 `GIT_TERMINAL_PROMPT=0`、`GH_PROMPT_DISA
 
 - 掛載點讀取自 `/proc/self/mountinfo`（第 5 個欄位，並解碼 `\040` 等八進位跳脫字元）。若該檔案無法讀取或沒有列出任何項目，所有候選 worktree 都會被保留。
 - 檔案系統視為區分大小寫：`/src/Wt` 與 `/src/wt` 是不同的資料夾。
-- 如果啟動 janitor 時所在的資料夾已被刪除（例如 hook 在剛移除的 worktree 中觸發），只要給了絕對路徑的 `--repo`（或 hook payload 中的 `cwd` 為絕對路徑）仍可執行。否則手動執行會以 1 結束並顯示 `current directory no longer exists; pass an absolute --repo`，hook 則安靜地以 0 結束。（Windows 無法刪除程序的工作目錄，所以不會發生這種情況。）
+- 如果啟動 janitor 時所在的資料夾已被刪除（例如 hook 在剛移除的 worktree 中觸發），只要給了絕對路徑的 `--repo`（或 hook payload 中的 `cwd` 為絕對路徑）仍可執行。否則手動執行會以 1 結束並顯示 `current directory no longer exists; pass an absolute --repo`，hook 則安靜地以 0 結束。（Windows 無法刪除處理程序的工作目錄，所以不會發生這種情況。）
 
 ### 所有平台
 
