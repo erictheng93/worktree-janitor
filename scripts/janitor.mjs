@@ -16,7 +16,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const IS_WIN = process.platform === 'win32';
-const IS_LINUX = process.platform === 'linux';
 const MOUNTINFO = '/proc/self/mountinfo';
 const HOOK_BUDGET_MS = 20_000;
 const FETCH_TIMEOUT_MS = 15_000;
