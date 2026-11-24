@@ -893,9 +893,11 @@ const HDI = (() => {
     }
   };
   let n = 0;
-  const create = () => {
+  // An APFS image needs more room than an HFS+ one (container overhead).
+  const SIZE = { 'HFS+': '8m', APFS: '32m' };
+  const create = (fsType) => {
     const dmg = path.join(ROOT, `jt-${++n}.dmg`);
-    retry(() => exec(false, ['create', '-quiet', '-size', '8m', '-fs', 'HFS+', '-volname', `jt${n}`, '-type', 'UDIF', dmg]));
+    retry(() => exec(false, ['create', '-quiet', '-size', SIZE[fsType], '-fs', fsType, '-volname', `jt${n}`, '-type', 'UDIF', dmg]));
     return dmg;
   };
   let sudo = false;
@@ -910,7 +912,7 @@ const HDI = (() => {
   const probe = path.join(ROOT, 'hdi-probe');
   let dmg;
   try {
-    dmg = create();
+    dmg = create('HFS+');
   } catch (e) {
     return { skip: `hdiutil create does not work here (${e.message.split('\n')[0]})` };
   }
@@ -932,114 +934,468 @@ const HDI = (() => {
       continue;
     }
     detach(probe);
-    return { skip: false, sudo, create, attach, detach };
+    // The same probe for an APFS image, with the attach method that worked.
+    const fsSkip = { 'HFS+': false, APFS: false };
+    const apfsProbe = path.join(ROOT, 'hdi-probe-apfs');
+    try {
+      attach(create('APFS'), apfsProbe);
+      try {
+        fs.writeFileSync(path.join(apfsProbe, 'probe.txt'), 'x');
+        if (fs.lstatSync(apfsProbe).dev === fs.lstatSync(ROOT).dev) throw new Error('attached APFS volume has the same st_dev as its parent');
+      } finally {
+        detach(apfsProbe);
+      }
+    } catch (e) {
+      fsSkip.APFS = `APFS image does not work here (${e.message.split('\n')[0]})`;
+    }
+    return { skip: false, sudo, create, attach, detach, fsSkip };
   }
   return { skip: `hdiutil attach does not work here (${errors.join('; ')})` };
 })();
 
-// CI sets JANITOR_REQUIRE_MOUNT_TESTS on ubuntu (passwordless sudo) and macOS
-// (hdiutil), so the mount tests cannot silently turn into skips there.
+// Facts about the platform that the test suite measures (what Node reports for
+// a mount point, st_dev values): shown as test diagnostics and, in CI, written
+// to the job summary so every runner leaves a record.
+function record(t, title, data) {
+  const text = JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
+  t.diagnostic(`${title}: ${text.replace(/\s*\n\s*/g, ' ')}`);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    try {
+      fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `#### ${title}\n\n\`\`\`json\n${text}\n\`\`\`\n\n`);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+// What Node reports for `p`, field by field, without following or throwing.
+function nodeView(p) {
+  const pick = (s) => ({
+    isDirectory: s.isDirectory(),
+    isSymbolicLink: s.isSymbolicLink(),
+    isFile: s.isFile(),
+    dev: s.dev,
+    ino: s.ino,
+    mode: `0o${s.mode.toString(8)}`,
+    nlink: s.nlink,
+  });
+  const attempt = (fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      return `throws ${e.code || e.message}`;
+    }
+  };
+  const parent = path.dirname(p);
+  return {
+    path: p,
+    lstat: attempt(() => pick(fs.lstatSync(p, { bigint: true }))),
+    stat: attempt(() => pick(fs.statSync(p, { bigint: true }))),
+    readlink: attempt(() => fs.readlinkSync(p)),
+    realpathNative: attempt(() => fs.realpathSync.native(p)),
+    realpathJs: attempt(() => fs.realpathSync(p)),
+    direntInParent: attempt(() => {
+      const d = fs.readdirSync(parent, { withFileTypes: true }).find((x) => x.name === path.basename(p));
+      return d ? { isDirectory: d.isDirectory(), isSymbolicLink: d.isSymbolicLink() } : 'not listed';
+    }),
+    entries: attempt(() => fs.readdirSync(p)),
+  };
+}
+
+// CI sets JANITOR_REQUIRE_MOUNT_TESTS on ubuntu (passwordless sudo), macOS
+// (hdiutil, HFS+ and APFS) and Windows (admin runners: VHDX volume mount
+// points), so the mount tests cannot silently turn into skips there.
 test('mount tests are runnable where CI requires them', { skip: !process.env.JANITOR_REQUIRE_MOUNT_TESTS && 'JANITOR_REQUIRE_MOUNT_TESTS not set' }, () => {
-  const skip = process.platform === 'darwin' ? HDI.skip : MOUNT.skip;
-  assert.equal(skip, false, `mount tests would be skipped: ${skip}`);
+  if (process.platform === 'darwin') {
+    assert.equal(HDI.skip, false, `mount tests would be skipped: ${HDI.skip}`);
+    assert.equal(HDI.fsSkip.APFS, false, `APFS mount tests would be skipped: ${HDI.fsSkip.APFS}`);
+  } else if (IS_WIN) assert.equal(WINVOL.skip, false, `mount tests would be skipped: ${WINVOL.skip}`);
+  else assert.equal(MOUNT.skip, false, `mount tests would be skipped: ${MOUNT.skip}`);
 });
 
-describe('macOS disk image (hdiutil) mounted inside a worktree', { skip: HDI.skip, concurrency: 1 }, () => {
-  // A fresh image with `files` on it, attached at `mp` for `body`, always
-  // detached afterwards (so the suite's cleanup never recurses into it).
-  async function withImage(mp, files, body) {
-    const dmg = HDI.create();
-    HDI.attach(dmg, mp);
-    try {
-      for (const [name, content] of Object.entries(files)) {
-        fs.mkdirSync(path.dirname(path.join(mp, name)), { recursive: true });
-        fs.writeFileSync(path.join(mp, name), content);
+const PRECIOUS = { 'data.txt': 'do-not-delete\n', 'sub/more.txt': 'more\n' };
+// Files only, straight on the volume's root: no subdirectory of the mounted
+// volume that a directory walk could notice by its st_dev.
+const PRECIOUS_FLAT = { 'data.txt': 'do-not-delete\n', 'more.txt': 'more\n' };
+
+function writeFiles(dir, files) {
+  for (const [name, content] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    fs.writeFileSync(path.join(dir, name), content);
+  }
+}
+function assertFiles(dir, files) {
+  for (const [name, content] of Object.entries(files)) assert.equal(fs.readFileSync(path.join(dir, name), 'utf8'), content, name);
+}
+
+for (const fsType of ['HFS+', 'APFS']) {
+  describe(`macOS ${fsType} disk image (hdiutil) mounted inside a worktree`, { skip: HDI.skip || HDI.fsSkip[fsType], concurrency: 1 }, () => {
+    // A fresh image with `files` on it, attached at `mp` for `body`, always
+    // detached afterwards (so the suite's cleanup never recurses into it).
+    async function withImage(mp, files, body) {
+      const dmg = HDI.create(fsType);
+      HDI.attach(dmg, mp);
+      try {
+        writeFiles(mp, files);
+        await body();
+      } finally {
+        HDI.detach(mp);
       }
-      await body();
-    } finally {
-      HDI.detach(mp);
+      return dmg;
     }
-    return dmg;
-  }
 
-  // The image still holds `files` after the janitor ran: re-attach it elsewhere.
-  function assertImageHolds(dmg, files) {
-    const mp = path.join(ROOT, `verify-${path.basename(dmg, '.dmg')}`);
-    HDI.attach(dmg, mp);
+    // The image still holds `files` after the janitor ran: re-attach it elsewhere.
+    function assertImageHolds(dmg, files) {
+      const mp = path.join(ROOT, `verify-${path.basename(dmg, '.dmg')}`);
+      HDI.attach(dmg, mp);
+      try {
+        assertFiles(mp, files);
+      } finally {
+        HDI.detach(mp);
+      }
+    }
+
+    test(`image attached at a gitignored path (${HDI.sudo ? 'sudo ' : ''}hdiutil): st_dev differs from the worktree root's`, async (t) => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'hdidev', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      await withImage(mp, PRECIOUS, async () => {
+        // This is the only signal the janitor has on macOS.
+        const rootDev = fs.lstatSync(wt).dev;
+        record(t, `${fsType} image st_dev (${process.platform} ${os.release()} ${process.arch}, node ${process.version})`, {
+          worktreeRoot: rootDev,
+          mountPoint: fs.lstatSync(mp).dev,
+          insideImage: fs.lstatSync(path.join(mp, 'sub')).dev,
+          tmpdirRoot: fs.lstatSync(ROOT).dev,
+          view: nodeView(mp),
+        });
+        assert.notEqual(fs.lstatSync(mp).dev, rootDev, 'mount point is on another device');
+        assert.equal(fs.lstatSync(path.join(mp, 'sub')).dev, fs.lstatSync(mp).dev, 'inside the image: same device as its root');
+        assert.equal(fs.lstatSync(path.join(wt, 'README.md')).dev, rootDev);
+        assert.deepEqual(lib.scanTree(wt, { deadline: () => Infinity }).foreignDev.map(canon), [canon(mp)]);
+        // No mountinfo on macOS: the st_dev walk is all there is.
+        assert.deepEqual(lib.mountCheck(wt), { mounts: [], error: null });
+      });
+    });
+
+    test('image attached at a gitignored path: kept, data on the image intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'hdi', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const dmg = await withImage(mp, PRECIOUS, async () => {
+        assert.equal(await git(wt, 'status', '--porcelain'), '', 'ignored mount leaves the tree clean');
+        await assertKept(r, wt, 'hdi', /contains mount point .*node_modules; unmount it first/);
+        assertFiles(mp, PRECIOUS);
+      });
+      assertImageHolds(dmg, PRECIOUS);
+    });
+
+    test('image holding only files at its root: kept, data on the image intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'hdiflat', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const dmg = await withImage(mp, PRECIOUS_FLAT, async () => {
+        await assertKept(r, wt, 'hdiflat', /contains mount point .*node_modules; unmount it first/);
+      });
+      assertImageHolds(dmg, PRECIOUS_FLAT);
+    });
+
+    test('image attached 9 levels deep: kept, data on the image intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'hdideep', 'merge');
+      const mp = path.join(wt, 'node_modules', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'mnt');
+      const dmg = await withImage(mp, PRECIOUS, async () => {
+        await assertKept(r, wt, 'hdideep', /contains mount point .*node_modules\/a\/b\/c\/d\/e\/f\/g\/mnt; unmount it first/);
+      });
+      assertImageHolds(dmg, PRECIOUS);
+    });
+
+    test('image attached at a non-ignored path: kept as dirty, data on the image intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'hdivisible', 'merge');
+      const dmg = await withImage(path.join(wt, 'data'), PRECIOUS, async () => {
+        await assertKept(r, wt, 'hdivisible', /dirty/);
+      });
+      assertImageHolds(dmg, PRECIOUS);
+    });
+
+    test('dry run (human output) reports the worktree kept with the mount reason and changes nothing', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'hdidry', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const before = await git(r.main, 'worktree', 'list', '--porcelain');
+      const dmg = await withImage(mp, PRECIOUS, async () => {
+        await assertDryRunKept(r, wt, /contains mount point .*node_modules; unmount it first/);
+      });
+      assert.equal(await git(r.main, 'worktree', 'list', '--porcelain'), before);
+      assert.ok(await branchExists(r, 'hdidry'));
+      assertImageHolds(dmg, PRECIOUS);
+    });
+  });
+}
+
+// The human dry-run report lists `wt` as kept, with a reason matching `re`.
+async function assertDryRunKept(r, wt, re) {
+  const res = await janitor([], { cwd: r.main, env: { FAKE_GH_DATA: r.ghData } });
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /\(dry run\)/);
+  const lines = res.stdout.split('\n');
+  const i = lines.findIndex((l) => l.includes(wt));
+  assert.ok(i >= 0, `worktree listed:\n${res.stdout}`);
+  assert.match(lines[i], /^\s+kept\s/);
+  assert.match(lines[i + 1], re);
+  assert.match(res.stdout, /Dry run: nothing was changed/);
+}
+
+// ---------------------------------------------------------------- Windows volume mount points
+//
+// On Windows a whole volume can be mounted on an empty NTFS directory (a
+// "volume mount point": a reparse point with tag IO_REPARSE_TAG_MOUNT_POINT,
+// the same tag as a junction, but naming \??\Volume{guid}\). Deleting through
+// it deletes the volume's files. Creating one needs an elevated process
+// (GitHub's Windows runners are elevated); the volume here is a small VHDX
+// created and attached with diskpart. Otherwise these tests are skipped.
+const WINVOL = (() => {
+  if (!IS_WIN) return { skip: 'volume mount point tests are Windows-only' };
+  const ok = (cmd, args) => spawnSync(cmd, args, { stdio: 'ignore', windowsHide: true }).status === 0;
+  // `net session` and `fltmc` both succeed only in an elevated process.
+  if (!ok('net', ['session']) && !ok('fltmc', [])) {
+    return { skip: 'volume mount point tests need an elevated (administrator) process: net session and fltmc both failed' };
+  }
+  if (/\s/.test(ROOT)) return { skip: `diskpart cannot take the temp path ${ROOT} (contains whitespace)` };
+  let n = 0;
+  const diskpart = (lines) => {
+    const script = path.join(ROOT, `diskpart-${++n}.txt`);
+    fs.writeFileSync(script, [...lines, 'exit', ''].join('\r\n'));
+    const r = spawnSync('diskpart', ['/s', script], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+    if (r.status !== 0) throw new Error(`diskpart (${lines.join(' | ')}) failed with ${r.status}: ${(r.stdout || '').trim().split(/\r?\n/).slice(-4).join(' / ')}${r.error ? ` ${r.error.message}` : ''}`);
+    return r.stdout;
+  };
+  const powershell = (script) => {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `$ErrorActionPreference = 'Stop'; ${script}`], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 180_000,
+    });
+    if (r.status !== 0) throw new Error(`powershell failed with ${r.status}: ${(r.stderr || r.stdout || String(r.error || '')).trim().split(/\r?\n/)[0]}`);
+    return r.stdout.trim();
+  };
+  const psq = (s) => `'${s.replace(/'/g, "''")}'`;
+  const partitionOf = (vhdx) => `(Get-DiskImage -ImagePath ${psq(vhdx)} | Get-Disk | Get-Partition | Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1)`;
+
+  // A new VHDX, attached, with one partition formatted `fsType`, mounted on
+  // the empty directory `mp`. -> { vhdx, format } (how it was formatted).
+  const create = (mp, fsType = 'ntfs') => {
+    const vhdx = path.join(ROOT, `jt-${++n}.vhdx`);
+    fs.mkdirSync(mp, { recursive: true });
+    // A Dev Drive must be at least 50 GB; the expandable file stays small.
+    const size = fsType === 'refs' ? 51200 : 64;
+    // One diskpart session: after `attach vdisk` the new disk has the focus,
+    // after `create partition` the new partition does.
+    const steps = [`create vdisk file="${vhdx}" maximum=${size} type=expandable`, `select vdisk file="${vhdx}"`, 'attach vdisk', 'create partition primary'];
+    if (fsType === 'ntfs') {
+      try {
+        diskpart([...steps, 'format fs=ntfs quick label=jt', `assign mount=${mp}`]);
+      } catch (e) {
+        destroy(vhdx);
+        throw e;
+      }
+      return { vhdx, format: 'NTFS (diskpart format fs=ntfs)' };
+    }
     try {
-      for (const [name, content] of Object.entries(files)) assert.equal(fs.readFileSync(path.join(mp, name), 'utf8'), content, name);
-    } finally {
-      HDI.detach(mp);
+      diskpart(steps);
+    } catch (e) {
+      destroy(vhdx);
+      throw e;
     }
+    let format;
+    try {
+      {
+        // Dev Drive first (Windows 11 / Server 2025), plain ReFS otherwise.
+        const errors = [];
+        try {
+          powershell(`${partitionOf(vhdx)} | Format-Volume -DevDrive -Confirm:$false -Force | Out-Null`);
+          format = 'Dev Drive (Format-Volume -DevDrive)';
+        } catch (e) {
+          errors.push(`Format-Volume -DevDrive: ${e.message}`);
+        }
+        if (!format) {
+          try {
+            powershell(`${partitionOf(vhdx)} | Format-Volume -FileSystem ReFS -Confirm:$false -Force | Out-Null`);
+            format = 'ReFS (Format-Volume -FileSystem ReFS)';
+          } catch (e) {
+            errors.push(`Format-Volume -FileSystem ReFS: ${e.message}`);
+          }
+        }
+        if (!format) throw new Error(errors.join('; '));
+      }
+      powershell(`${partitionOf(vhdx)} | Add-PartitionAccessPath -AccessPath ${psq(mp + path.sep)}`);
+    } catch (e) {
+      destroy(vhdx);
+      throw e;
+    }
+    return { vhdx, format };
+  };
+  // Remove the mount point (leaves an empty directory), detach, delete.
+  const unmount = (mp) => spawnSync('mountvol', [mp + path.sep, '/D'], { stdio: 'ignore', windowsHide: true });
+  const detach = (vhdx) => diskpart([`select vdisk file="${vhdx}"`, 'detach vdisk']);
+  const destroy = (vhdx) => {
+    try {
+      detach(vhdx);
+    } catch {
+      /* not attached */
+    }
+    fs.rmSync(vhdx, { force: true });
+  };
+  // Re-attach a detached VHDX at `mp` (no drive letter) for `body`.
+  const reattach = (vhdx, mp, body) => {
+    fs.mkdirSync(mp, { recursive: true });
+    powershell(`Mount-DiskImage -ImagePath ${psq(vhdx)} -NoDriveLetter | Out-Null`);
+    try {
+      powershell(`${partitionOf(vhdx)} | Add-PartitionAccessPath -AccessPath ${psq(mp + path.sep)}`);
+      try {
+        body();
+      } finally {
+        unmount(mp);
+      }
+    } finally {
+      detach(vhdx);
+    }
+  };
+
+  // Probe: an NTFS VHDX mounted on a directory must be writable.
+  const probe = path.join(ROOT, 'vol-probe');
+  try {
+    const { vhdx } = create(probe);
+    try {
+      fs.writeFileSync(path.join(probe, 'probe.txt'), 'x');
+    } finally {
+      unmount(probe);
+      destroy(vhdx);
+    }
+  } catch (e) {
+    return { skip: `cannot mount a VHDX on a directory here (${e.message.split('\n')[0]})` };
   }
+  // ReFS / Dev Drive: optional, the reason is recorded when it is unavailable.
+  let refsSkip = false;
+  let refsFormat = null;
+  const refsProbe = path.join(ROOT, 'vol-probe-refs');
+  try {
+    const { vhdx, format } = create(refsProbe, 'refs');
+    refsFormat = format;
+    try {
+      fs.writeFileSync(path.join(refsProbe, 'probe.txt'), 'x');
+    } finally {
+      unmount(refsProbe);
+      destroy(vhdx);
+    }
+  } catch (e) {
+    refsSkip = `no ReFS / Dev Drive volume here (${e.message.split('\n')[0]})`;
+  }
+  return { skip: false, create, unmount, destroy, detach, reattach, refsSkip, refsFormat };
+})();
 
-  const PRECIOUS = { 'data.txt': 'do-not-delete\n', 'sub/more.txt': 'more\n' };
+for (const fsType of ['ntfs', 'refs']) {
+  const label = fsType === 'ntfs' ? 'NTFS VHDX' : 'ReFS / Dev Drive VHDX';
+  describe(`Windows ${label} mounted on a directory inside a worktree`, { skip: WINVOL.skip || (fsType === 'refs' && WINVOL.refsSkip), concurrency: 1 }, () => {
+    // A fresh volume with `files` on it, mounted at `mp` for `body`; the mount
+    // point is always removed and the VHDX detached afterwards.
+    async function withVolume(mp, files, body) {
+      const { vhdx, format } = WINVOL.create(mp, fsType);
+      try {
+        writeFiles(mp, files);
+        await body(format);
+      } finally {
+        WINVOL.unmount(mp);
+        WINVOL.detach(vhdx);
+      }
+      return vhdx;
+    }
+    // The detached VHDX still holds `files`: re-attach it elsewhere, then delete it.
+    function assertVolumeHolds(vhdx, files) {
+      try {
+        WINVOL.reattach(vhdx, path.join(ROOT, `verify-${path.basename(vhdx, '.vhdx')}`), () => assertFiles(path.join(ROOT, `verify-${path.basename(vhdx, '.vhdx')}`), files));
+      } finally {
+        WINVOL.destroy(vhdx);
+      }
+    }
 
-  test(`image attached at a gitignored path (${HDI.sudo ? 'sudo ' : ''}hdiutil): st_dev differs from the worktree root's`, async () => {
-    const r = await makeRepo();
-    const { wt } = await mergedFeature(r, 'hdidev', 'merge');
-    const mp = path.join(wt, 'node_modules');
-    await withImage(mp, PRECIOUS, async () => {
-      // This is the only signal the janitor has on macOS.
-      const rootDev = fs.lstatSync(wt).dev;
-      assert.notEqual(fs.lstatSync(mp).dev, rootDev, 'mount point is on another device');
-      assert.equal(fs.lstatSync(path.join(mp, 'sub')).dev, fs.lstatSync(mp).dev, 'inside the image: same device as its root');
-      assert.equal(fs.lstatSync(path.join(wt, 'README.md')).dev, rootDev);
-      assert.deepEqual(lib.scanTree(wt, { deadline: () => Infinity }).foreignDev.map(canon), [canon(mp)]);
-      // No mountinfo on macOS: the st_dev walk is all there is.
-      assert.deepEqual(lib.mountCheck(wt), { mounts: [], error: null });
+    test(`what Node reports for the mount point (${fsType})`, async (t) => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'voldev', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const vhdx = await withVolume(mp, PRECIOUS, async (format) => {
+        const scan = lib.scanTree(wt, { deadline: () => Infinity });
+        const osv = spawnSync('cmd', ['/d', '/c', 'ver'], { encoding: 'utf8' }).stdout.trim();
+        record(t, `${format} volume mount point (${osv}, ${process.arch}, node ${process.version})`, {
+          worktreeRoot: nodeView(wt).lstat,
+          mountPoint: nodeView(mp),
+          fileOnVolume: nodeView(path.join(mp, 'data.txt')).lstat,
+          dirOnVolume: nodeView(path.join(mp, 'sub')).lstat,
+          scanTree: { links: scan.links, foreignDev: scan.foreignDev, unreadable: scan.unreadable },
+        });
+        // The mount point itself must be what the janitor reports.
+        assert.ok(
+          scan.links.map(canon).includes(canon(mp)) || scan.foreignDev.map(canon).includes(canon(mp)),
+          `scanTree reports the mount point itself (links: ${scan.links}, foreignDev: ${scan.foreignDev})`,
+        );
+      });
+      assertVolumeHolds(vhdx, PRECIOUS);
+    });
+
+    test('volume mounted at a gitignored path: kept, data on the volume intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'vol', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const vhdx = await withVolume(mp, PRECIOUS, async () => {
+        assert.equal(await git(wt, 'status', '--porcelain'), '', 'ignored mount leaves the tree clean');
+        await assertKept(r, wt, 'vol', /contains mount point .*node_modules; unmount it first/);
+        assertFiles(mp, PRECIOUS);
+      });
+      assertVolumeHolds(vhdx, PRECIOUS);
+    });
+
+    test('volume holding only files at its root: kept, data on the volume intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'volflat', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const vhdx = await withVolume(mp, PRECIOUS_FLAT, async () => {
+        await assertKept(r, wt, 'volflat', /contains mount point .*node_modules; unmount it first/);
+        assertFiles(mp, PRECIOUS_FLAT);
+      });
+      assertVolumeHolds(vhdx, PRECIOUS_FLAT);
+    });
+
+    test('volume mounted 9 levels deep: kept, data on the volume intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'voldeep', 'merge');
+      const mp = path.join(wt, 'node_modules', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'mnt');
+      const vhdx = await withVolume(mp, PRECIOUS, async () => {
+        await assertKept(r, wt, 'voldeep', /contains mount point .*node_modules\\a\\b\\c\\d\\e\\f\\g\\mnt; unmount it first/);
+      });
+      assertVolumeHolds(vhdx, PRECIOUS);
+    });
+
+    test('volume mounted at a non-ignored path: kept as dirty, data on the volume intact', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'volvisible', 'merge');
+      const vhdx = await withVolume(path.join(wt, 'data'), PRECIOUS, async () => {
+        await assertKept(r, wt, 'volvisible', /dirty/);
+      });
+      assertVolumeHolds(vhdx, PRECIOUS);
+    });
+
+    test('dry run (human output) reports the worktree kept with the mount reason and changes nothing', async () => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, 'voldry', 'merge');
+      const mp = path.join(wt, 'node_modules');
+      const before = await git(r.main, 'worktree', 'list', '--porcelain');
+      const vhdx = await withVolume(mp, PRECIOUS, async () => {
+        await assertDryRunKept(r, wt, /contains mount point .*node_modules; unmount it first/);
+      });
+      assert.equal(await git(r.main, 'worktree', 'list', '--porcelain'), before);
+      assert.ok(await branchExists(r, 'voldry'));
+      assertVolumeHolds(vhdx, PRECIOUS);
     });
   });
-
-  test('image attached at a gitignored path: kept, data on the image intact', async () => {
-    const r = await makeRepo();
-    const { wt } = await mergedFeature(r, 'hdi', 'merge');
-    const mp = path.join(wt, 'node_modules');
-    const dmg = await withImage(mp, PRECIOUS, async () => {
-      assert.equal(await git(wt, 'status', '--porcelain'), '', 'ignored mount leaves the tree clean');
-      await assertKept(r, wt, 'hdi', /contains mount point .*node_modules; unmount it first/);
-      assert.equal(fs.readFileSync(path.join(mp, 'data.txt'), 'utf8'), 'do-not-delete\n');
-    });
-    assertImageHolds(dmg, PRECIOUS);
-  });
-
-  test('image attached 9 levels deep: kept, data on the image intact', async () => {
-    const r = await makeRepo();
-    const { wt } = await mergedFeature(r, 'hdideep', 'merge');
-    const mp = path.join(wt, 'node_modules', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'mnt');
-    const dmg = await withImage(mp, PRECIOUS, async () => {
-      await assertKept(r, wt, 'hdideep', /contains mount point .*node_modules\/a\/b\/c\/d\/e\/f\/g\/mnt; unmount it first/);
-    });
-    assertImageHolds(dmg, PRECIOUS);
-  });
-
-  test('image attached at a non-ignored path: kept as dirty, data on the image intact', async () => {
-    const r = await makeRepo();
-    const { wt } = await mergedFeature(r, 'hdivisible', 'merge');
-    const dmg = await withImage(path.join(wt, 'data'), PRECIOUS, async () => {
-      await assertKept(r, wt, 'hdivisible', /dirty/);
-    });
-    assertImageHolds(dmg, PRECIOUS);
-  });
-
-  test('dry run (human output) reports the worktree kept with the mount reason and changes nothing', async () => {
-    const r = await makeRepo();
-    const { wt } = await mergedFeature(r, 'hdidry', 'merge');
-    const mp = path.join(wt, 'node_modules');
-    const before = await git(r.main, 'worktree', 'list', '--porcelain');
-    const dmg = await withImage(mp, PRECIOUS, async () => {
-      const res = await janitor([], { cwd: r.main, env: { FAKE_GH_DATA: r.ghData } });
-      assert.equal(res.code, 0, res.stderr);
-      assert.match(res.stdout, /\(dry run\)/);
-      const lines = res.stdout.split('\n');
-      const i = lines.findIndex((l) => l.includes(wt));
-      assert.ok(i >= 0, `worktree listed:\n${res.stdout}`);
-      assert.match(lines[i], /^\s+kept\s/);
-      assert.match(lines[i + 1], /contains mount point .*node_modules; unmount it first/);
-      assert.match(res.stdout, /Dry run: nothing was changed/);
-    });
-    assert.equal(await git(r.main, 'worktree', 'list', '--porcelain'), before);
-    assert.ok(await branchExists(r, 'hdidry'));
-    assertImageHolds(dmg, PRECIOUS);
-  });
-});
+}
