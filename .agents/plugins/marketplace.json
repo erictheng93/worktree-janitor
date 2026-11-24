@@ -1,0 +1,11 @@
+{
+  "name": "worktree-janitor-marketplace",
+  "plugins": [
+    {
+      "name": "worktree-janitor",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE" },
+      "category": "Developer Tools"
+    }
+  ]
+}
