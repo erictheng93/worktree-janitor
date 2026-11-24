@@ -16,6 +16,10 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-release-'));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+// The build reads `git ls-files`. Old git (Debian 11's 2.30) in a container
+// refuses a checkout owned by another uid and ignores -c safe.directory.
+const gitOk = spawnSync('git', ['-c', `safe.directory=${REPO}`, 'ls-files'], { cwd: REPO }).status === 0;
+const skip = gitOk ? false : 'git refuses this checkout (dubious ownership); the release build runs on a normal checkout';
 
 // Names in a ustar archive, read back with our own minimal parser.
 function tarNames(buf) {
@@ -32,7 +36,7 @@ function tarNames(buf) {
   return names;
 }
 
-test('build: archives hold only runtime files under one top-level directory, reproducibly', () => {
+test('build: archives hold only runtime files under one top-level directory, reproducibly', { skip }, () => {
   const version = manifestVersion();
   const a = build({ out: path.join(ROOT, 'a'), mtime: 1700000000 });
   const b = build({ out: path.join(ROOT, 'b'), mtime: 1700000000 });
@@ -64,12 +68,12 @@ test('build: archives hold only runtime files under one top-level directory, rep
   if (t.status === 0) assert.ok(t.stdout.includes(`${top}scripts/janitor.mjs`));
 });
 
-test('build: refuses a version that does not match the manifests', () => {
+test('build: refuses a version that does not match the manifests', { skip }, () => {
   assert.throws(() => build({ out: path.join(ROOT, 'c'), version: 'v9.9.9' }), /does not match the manifests/);
   assert.throws(() => build({ out: path.join(ROOT, 'c'), version: 'latest' }), /must look like/);
 });
 
-test('zip extracts with the system tool to the same files as the tarball', () => {
+test('zip extracts with the system tool to the same files as the tarball', { skip }, () => {
   const out = path.join(ROOT, 'z');
   const r = build({ out, mtime: 1700000000 });
   const x = path.join(ROOT, 'zx');
