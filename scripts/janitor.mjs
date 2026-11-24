@@ -395,33 +395,107 @@ function removeLinkOnly(p) {
   return { link: p, target, targetExisted };
 }
 
-// Recursive delete that never follows links: links are unlinked, files
-// unlinked, directories emptied then rmdir'd. Used as the fallback when git
-// cannot delete (long paths) or when links may exist below the scan depth.
-function safeRemoveTree(p) {
-  const np = nsPath(p);
-  const st = lstatOrNull(np);
-  if (!st) return;
-  if (isLink(np, st)) {
-    removeLinkOnly(p);
-    return;
+// Deletion stopped at `at`. `removed` entries were already deleted (0: none),
+// `safety` marks a surprise (type change, foreign device) as opposed to a
+// plain I/O failure.
+class StopError extends Error {
+  constructor(message, at, safety) {
+    super(message);
+    this.at = at;
+    this.safety = safety;
+    this.removed = 0;
+    this.links = [];
   }
-  if (st.isDirectory()) {
-    for (const name of fs.readdirSync(np)) safeRemoveTree(path.join(p, name));
-    try {
-      fs.rmdirSync(np);
-    } catch (e) {
-      fs.chmodSync(np, 0o777);
-      fs.rmdirSync(np);
-    }
-    return;
-  }
+}
+
+function lstatBigOrNull(p) {
   try {
-    fs.unlinkSync(np);
+    return fs.lstatSync(p, { bigint: true });
   } catch {
-    fs.chmodSync(np, 0o666);
-    fs.unlinkSync(np);
+    return null;
   }
+}
+
+// Test hook, inert unless set: from its second lstat on, the directory at
+// $JANITOR_TEST_FOREIGN_DEV_AT reports a foreign st_dev, i.e. it "becomes a
+// mount point" after deletion has emptied it. Lets the test suite exercise
+// the mid-deletion stop without root.
+const TEST_FOREIGN_DEV_AT = process.env.JANITOR_TEST_FOREIGN_DEV_AT || null;
+
+// Delete the worktree at `root` without git, failing closed. Never follows
+// links (a link is unlinked, with its target checked intact afterwards).
+// Before descending into a directory and again before removing it, re-lstat
+// it and require: still a directory, not a link, same inode as when listed,
+// and the root's st_dev. Any surprise or failure STOPS everything at once:
+// nothing further is deleted, and the StopError says where. The root's
+// `.git` file goes last, so a stopped deletion leaves a registered worktree.
+// -> { removed, links }
+function removeTreeFailClosed(root) {
+  const st0 = lstatBigOrNull(nsPath(root));
+  if (!st0 || isLink(nsPath(root), st0) || !st0.isDirectory()) throw new StopError(`SAFETY: ${root} is not a plain directory`, root, true);
+  const rootDev = st0.dev;
+  const testKey = TEST_FOREIGN_DEV_AT ? normKey(TEST_FOREIGN_DEV_AT) : null;
+  let testHits = 0;
+  const state = { removed: 0, links: [] };
+
+  const checkDir = (dir, expect) => {
+    const st = lstatBigOrNull(nsPath(dir));
+    if (!st) throw new StopError(`SAFETY: ${dir} vanished during deletion`, dir, true);
+    if (isLink(nsPath(dir), st) || !st.isDirectory()) throw new StopError(`SAFETY: ${dir} stopped being a plain directory during deletion`, dir, true);
+    if (st.ino !== expect.ino) throw new StopError(`SAFETY: ${dir} was replaced during deletion`, dir, true);
+    const foreign = testKey !== null && normKey(dir) === testKey && ++testHits >= 2;
+    if (foreign || st.dev !== rootDev) throw new StopError(`SAFETY: ${dir} is on another device (a mount point?); stopped deleting`, dir, true);
+    return st;
+  };
+  const retry = (p, op, mode) => {
+    try {
+      op(nsPath(p));
+    } catch {
+      try {
+        fs.chmodSync(nsPath(p), mode);
+        op(nsPath(p));
+      } catch (e) {
+        throw new StopError(`could not delete ${p}: ${(e && e.code) || (e && e.message) || e}`, p, false);
+      }
+    }
+    state.removed++;
+  };
+  const removeDir = (dir, expect, isRoot) => {
+    const st = checkDir(dir, expect);
+    let names;
+    try {
+      names = fs.readdirSync(nsPath(dir));
+    } catch (e) {
+      throw new StopError(`cannot read ${dir}: ${(e && e.code) || e}`, dir, false);
+    }
+    if (isRoot && names.includes('.git')) names = [...names.filter((n) => n !== '.git'), '.git'];
+    for (const name of names) {
+      const p = path.join(dir, name);
+      const cst = lstatBigOrNull(nsPath(p));
+      if (!cst) continue; // already gone: nothing to delete
+      if (isLink(nsPath(p), cst)) {
+        try {
+          state.links.push(removeLinkOnly(p));
+        } catch (e) {
+          throw new StopError(e.message, p, e instanceof SafetyError);
+        }
+        state.removed++;
+      } else if (cst.isDirectory()) removeDir(p, cst, false);
+      else retry(p, (np) => fs.unlinkSync(np), 0o666);
+    }
+    checkDir(dir, st);
+    retry(dir, (np) => fs.rmdirSync(np), 0o777);
+  };
+
+  try {
+    removeDir(root, st0, true);
+  } catch (e) {
+    const stop = e instanceof StopError ? e : new StopError(`deletion failed: ${e && e.message}`, root, false);
+    stop.removed = state.removed;
+    stop.links = state.links;
+    throw stop;
+  }
+  return state;
 }
 
 // `git worktree remove` (without --force) refuses a worktree with submodules:
@@ -623,7 +697,7 @@ function janitor(opts, ctx) {
   let safetyAbort = false;
   let pruneNeeded = false;
 
-  const wtReport = (wt, action, reason) => report.worktrees.push({ path: wt.path, branch: wt.branch, action, reason });
+  const wtReport = (wt, action, reason, extra = {}) => report.worktrees.push({ path: wt.path, branch: wt.branch, action, reason, ...extra });
 
   wtList.forEach((wt, idx) => {
     if (idx === 0) return wtReport(wt, 'kept', 'main worktree');
@@ -677,15 +751,26 @@ function janitor(opts, ctx) {
     const linkNote = scan.links.length ? `; ${scan.links.length} link(s) to be unlinked first` : '';
     if (!opts.apply) return wtReport(wt, 'would-remove', verdict.reason + lockNote + linkNote);
 
+    let res;
     try {
-      removeWorktree(repo, wt, scan);
-      checkedOut.delete(wt.branch);
-      wtReport(wt, 'removed', verdict.reason + lockNote + (scan.links.length ? `; unlinked ${scan.links.length} link(s) first` : ''));
+      res = removeWorktree(repo, wt);
     } catch (e) {
-      if (e instanceof SafetyError) safetyAbort = true;
+      const stop = e instanceof StopError ? e : null;
+      if (e instanceof SafetyError || (stop && stop.safety)) safetyAbort = true;
       report.errors.push(e.message);
-      wtReport(wt, 'kept', `removal failed: ${firstLine(e.message)}`);
+      // Something was already deleted: say so, and exactly where it stopped.
+      if (stop && stop.removed > 0) {
+        const n = `${stop.removed} entr${stop.removed === 1 ? 'y' : 'ies'}`;
+        return wtReport(wt, 'partial', `deletion stopped at ${stop.at} after deleting ${n}: ${firstLine(e.message)}; nothing further was deleted`, { stoppedAt: stop.at });
+      }
+      return wtReport(wt, 'kept', `removal failed: ${firstLine(e.message)}`);
     }
+    for (const p of res.problems) {
+      report.errors.push(p.msg);
+      if (p.safety) safetyAbort = true;
+    }
+    if (!res.registered) checkedOut.delete(wt.branch);
+    wtReport(wt, 'removed', verdict.reason + lockNote + (res.links.length ? `; unlinked ${res.links.length} link(s), targets untouched` : ''));
   });
 
   if (pruneNeeded) git(['worktree', 'prune'], { cwd: repo });
@@ -732,61 +817,43 @@ function janitor(opts, ctx) {
   return report;
 }
 
-function removeWorktree(repo, wt, scan) {
+function removeWorktree(repo, wt) {
   // Re-check the registration right before acting: never delete a path git
   // did not register, never the main worktree, never one containing it.
   if (samePath(wt.path, repo) || isInside(repo, wt.path)) throw new SafetyError('SAFETY: refusing to remove the main worktree');
   const now = parseWorktrees(gitOut(['worktree', 'list', '--porcelain'], { cwd: repo }) || '');
   if (!now.slice(1).some((w) => samePath(w.path, wt.path))) throw new Error(`no longer registered: ${wt.path}`);
 
-  // (a) Unlink every link inside the worktree BEFORE git touches it.
-  // `git worktree remove` on Windows recurses THROUGH NTFS junctions (e.g. a
-  // node_modules junction into the main checkout) and deletes their targets.
   // Mounts again, right before touching anything: the scan may be seconds old.
   const mountKeep = mountKeepReason(wt.path, scanTree(wt.path));
   if (mountKeep) throw new Error(mountKeep);
-  const removedLinks = scan.links.map((l) => removeLinkOnly(l));
-  const rescan = scanTree(wt.path);
-  if (rescan.links.length) throw new Error(`links remain after unlinking: ${rescan.links[0]}`);
 
-  // If any removed link was a symlink tracked by git, the tree is now
-  // "modified" by us; git would refuse without --force, so use the safe
-  // deleter instead (the tree was verified clean before we touched it).
-  let trackedLinkRemoved = false;
-  if (removedLinks.length) {
-    const ls = git(['ls-files', '-s', '-z'], { cwd: wt.path });
-    const tracked = new Set();
-    for (const rec of ls.stdout.split('\0')) if (rec.startsWith('120000 ')) tracked.add(normKey(path.join(wt.path, rec.split('\t')[1] || '')));
-    trackedLinkRemoved = removedLinks.some((r) => tracked.has(normKey(path.resolve(r.link))));
-  }
+  // The janitor deletes the tree itself and never calls `git worktree remove`:
+  // git's recursive delete follows NTFS junctions on Windows (deleting e.g. a
+  // node_modules junction's target in the main checkout) and crosses into
+  // mounts everywhere (deleting the mounted source, then failing with EBUSY).
+  // removeTreeFailClosed unlinks links, stays on the root's device and stops
+  // at the first surprise; it throws a StopError saying how far it got.
+  const res = removeTreeFailClosed(wt.path);
 
+  // Only once the tree is gone: unlock (a stopped deletion keeps the lock)
+  // and drop the registration.
+  const problems = [];
   if (wt.locked) {
     const u = git(['worktree', 'unlock', wt.path], { cwd: repo });
-    if (!u.ok) throw new Error(`git worktree unlock failed: ${firstLine(u.stderr)}`);
-  }
-
-  // (b) git worktree remove (no --force). Fall back to the link-safe deleter
-  // only for long-path failures (win32) or tracked links we removed ourselves.
-  let useFallback = trackedLinkRemoved;
-  if (!useFallback) {
-    const r = git(['worktree', 'remove', wt.path], { cwd: repo });
-    if (!r.ok) {
-      // Long-path fallback is win32-only: there safeRemoveTree reaches past
-      // MAX_PATH through \\?\ paths. POSIX has no such escape hatch, so the
-      // fallback would only fail a second time; report git's error instead.
-      if (IS_WIN && /filename too long|path too long|name too long/i.test(r.stderr)) useFallback = true;
-      else throw new Error(`git worktree remove failed: ${firstLine(r.stderr)}`);
-    }
-  }
-  if (useFallback && fs.existsSync(wt.path)) {
-    safeRemoveTree(wt.path);
-    if (lstatOrNull(nsPath(wt.path))) throw new Error(`could not delete ${wt.path}`);
+    if (!u.ok) problems.push({ msg: `git worktree unlock failed: ${firstLine(u.stderr)}`, safety: false });
   }
   git(['worktree', 'prune'], { cwd: repo });
+  const after = parseWorktrees(gitOut(['worktree', 'list', '--porcelain'], { cwd: repo }) || '');
+  const registered = after.slice(1).some((w) => samePath(w.path, wt.path));
+  if (registered) problems.push({ msg: `directory deleted but git still lists ${wt.path}; run git worktree prune`, safety: false });
 
-  for (const r of removedLinks) {
-    if (r.targetExisted && !fs.existsSync(r.target)) throw new SafetyError(`SAFETY: link target ${r.target} vanished during worktree removal`);
+  for (const r of res.links) {
+    if (r.targetExisted && !isInside(r.target, wt.path) && !fs.existsSync(r.target)) {
+      problems.push({ msg: `SAFETY: link target ${r.target} vanished during worktree removal`, safety: true });
+    }
   }
+  return { links: res.links, registered, problems };
 }
 
 function firstLine(s) {
@@ -815,8 +882,11 @@ function hookSummary(report) {
   const list = (arr) => (arr.length > 4 ? `${arr.slice(0, 4).join(', ')}, +${arr.length - 4} more` : arr.join(', '));
   if (wts.length) parts.push(`removed ${wts.length} merged worktree(s) (${list(wts.map((w) => path.basename(w.path)))})`);
   if (brs.length) parts.push(`deleted ${brs.length} merged branch(es) (${list(brs.map((b) => b.name))})`);
+  // A half-deleted worktree must never go unmentioned.
+  const partial = report.worktrees.filter((w) => w.action === 'partial');
+  for (const w of partial) parts.push(`PARTIAL removal of ${path.basename(w.path)}: ${w.reason}`);
   const safety = report.errors.find((e) => e.startsWith('SAFETY'));
-  if (safety) parts.push(safety);
+  if (safety && !partial.length) parts.push(safety);
   return parts.length ? `worktree-janitor: ${parts.join('; ')}` : '';
 }
 
@@ -936,7 +1006,7 @@ async function main(argv) {
     }
     if (opts.json) process.stdout.write(JSON.stringify(report, null, 2) + '\n');
     else printHuman(report, opts.apply);
-    return report.errors.length ? 1 : 0;
+    return report.errors.length || report.worktrees.some((w) => w.action === 'partial') ? 1 : 0;
   } catch (e) {
     if (opts.hook) return 0;
     process.stderr.write(`worktree-janitor: ${e.message}\n`);

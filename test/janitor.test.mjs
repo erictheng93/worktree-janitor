@@ -552,6 +552,42 @@ describe('worktree-janitor', { concurrency: 6 }, () => {
     assert.match(wtEntry(again.json, wt).reason, /submodule git dirs/);
   });
 
+  test('a device change detected mid-deletion stops at once: action partial, exit 1, hook summary says so', async () => {
+    const setup = async (name) => {
+      const r = await makeRepo();
+      const { wt } = await mergedFeature(r, name, 'merge');
+      // The test hook makes this directory report a foreign st_dev once the
+      // deleter has emptied it, as if something got mounted there meanwhile.
+      const mnt = path.join(wt, 'node_modules', 'mnt');
+      fs.mkdirSync(path.join(mnt, 'x'), { recursive: true });
+      fs.writeFileSync(path.join(mnt, 'x', 'f.txt'), '1\n');
+      return { r, wt, mnt, env: { FAKE_GH_DATA: r.ghData, JANITOR_TEST_FOREIGN_DEV_AT: mnt } };
+    };
+    const assertStopped = async ({ r, wt, mnt }, name) => {
+      assert.ok(fs.existsSync(mnt), 'the directory it stopped at was not removed');
+      assert.ok(fs.existsSync(path.join(wt, '.git')), '.git is deleted last, so it is still there');
+      assert.ok((await git(r.main, 'worktree', 'list', '--porcelain')).split('\n').some((l) => l.startsWith('worktree ') && canon(l.slice(9)) === canon(wt)), 'still registered');
+      assert.ok(await branchExists(r, name), 'branch kept: still checked out');
+    };
+
+    const a = await setup('part');
+    const res = await janitor(['--json', '--apply'], { cwd: a.r.main, env: a.env });
+    assert.equal(res.code, 1);
+    const e = wtEntry(res.json, a.wt);
+    assert.equal(e.action, 'partial', e.reason);
+    assert.equal(canon(e.stoppedAt), canon(a.mnt));
+    assert.match(e.reason, /^deletion stopped at .*mnt after deleting \d+ entr(y|ies): SAFETY: .* is on another device \(a mount point\?\); stopped deleting; nothing further was deleted$/);
+    assert.ok(res.json.errors.some((m) => m.startsWith('SAFETY')));
+    assert.equal(brEntry(res.json, 'part').action, 'kept');
+    await assertStopped(a, 'part');
+
+    const b = await setup('parth');
+    const hook = await janitor(['--hook', 'session-start'], { cwd: b.r.main, input: JSON.stringify({ cwd: b.r.main }), env: b.env });
+    assert.equal(hook.code, 0);
+    assert.match(hook.stdout, /^worktree-janitor: PARTIAL removal of wt-parth: deletion stopped at .*mnt after deleting/);
+    await assertStopped(b, 'parth');
+  });
+
   test('POSIX symlinks: tracked file symlink, ignored file/dir symlinks and a dangling one are unlinked; targets intact', { skip: IS_WIN && 'file symlinks need privileges on Windows and git checks them out as text (core.symlinks=false)' }, async () => {
     const r = await makeRepo();
     const outside = path.join(r.dir, 'outside');
