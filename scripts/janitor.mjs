@@ -541,17 +541,38 @@ function parseWorktrees(text) {
   return out;
 }
 
-// Older git prints a bare `locked` without the reason; read it from the
-// worktree's admin dir (<common-dir>/worktrees/<name>/locked).
-function readLockReason(wt) {
+// git before 2.31 prints no `locked` (and no `prunable`) line at all in
+// `worktree list --porcelain`, so locks are read from where git keeps them:
+// the file <common-dir>/worktrees/<id>/locked, whose sibling <id>/gitdir names
+// the worktree's .git file. This also works when the worktree directory is
+// gone. -> Map(normKey(worktree path) -> lock reason, '' when none given).
+function adminLocks(repo) {
+  const locks = new Map();
+  const c = gitOut(['rev-parse', '--git-common-dir'], { cwd: repo });
+  if (!c) return locks;
+  const dir = path.join(path.resolve(repo, c), 'worktrees');
+  let ids;
   try {
-    const dotgit = fs.readFileSync(path.join(wt.path, '.git'), 'utf8');
-    const m = dotgit.match(/^gitdir:\s*(.+)$/m);
-    if (!m) return '';
-    return fs.readFileSync(path.join(path.resolve(wt.path, m[1].trim()), 'locked'), 'utf8').trim();
+    ids = fs.readdirSync(dir);
   } catch {
-    return '';
+    return locks;
   }
+  for (const id of ids) {
+    if (!lstatOrNull(path.join(dir, id, 'locked'))) continue;
+    let reason = '';
+    try {
+      reason = fs.readFileSync(path.join(dir, id, 'locked'), 'utf8').trim();
+    } catch {
+      /* locked all the same */
+    }
+    try {
+      const gitdir = fs.readFileSync(path.join(dir, id, 'gitdir'), 'utf8').trim();
+      if (gitdir) locks.set(normKey(path.dirname(path.resolve(dir, id, gitdir))), reason);
+    } catch {
+      /* no gitdir: git cannot map it to a worktree either */
+    }
+  }
+  return locks;
 }
 
 function resolveRepo(start) {
@@ -682,6 +703,13 @@ function janitor(opts, ctx) {
 
   const oracle = new MergeOracle(repo, base, ctx.ghTimeout);
   const wtList = parseWorktrees(gitOut(['worktree', 'list', '--porcelain'], { cwd: repo }) || '');
+  const locks = adminLocks(repo);
+  for (const wt of wtList) {
+    const reason = locks.get(normKey(wt.path));
+    if (reason === undefined) continue;
+    wt.locked = true;
+    if (!wt.lockReason) wt.lockReason = reason;
+  }
   const branchTips = new Map();
   for (const line of (gitOut(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads'], { cwd: repo }) || '').split(/\r?\n/)) {
     const [ref, sha] = line.split('\0');
@@ -704,8 +732,7 @@ function janitor(opts, ctx) {
     if (safetyAbort) return wtReport(wt, 'kept', 'skipped after a safety abort');
     if (remaining() <= 1000) return wtReport(wt, 'kept', 'time budget exhausted');
 
-    let lockReason = wt.lockReason;
-    if (wt.locked && !lockReason) lockReason = readLockReason(wt);
+    const lockReason = wt.lockReason;
     let staleLock = false;
     if (wt.locked) {
       const m = lockReason.match(CLAUDE_LOCK_RE);
