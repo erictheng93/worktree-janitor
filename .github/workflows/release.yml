@@ -1,0 +1,232 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching the version in package.json and both plugin
+# manifests) to publish a GitHub release with:
+#   worktree-janitor-vX.Y.Z.tar.gz / .zip, install.sh, install.ps1, SHA256SUMS
+# plus a build provenance attestation for each asset, then a pull request
+# that points Formula/worktree-janitor.rb at the new tarball.
+#
+# workflow_dispatch is a dry run: tests, build, and the assets uploaded as a
+# workflow artifact. It never creates a release.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload the assets as a workflow artifact only (publishing happens only on a tag push)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The deflate streams in the archives depend on the zlib inside Node.js:
+  # pin it so the same commit always gives the same bytes.
+  NODE_VERSION: 22.23.2
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Git identity
+        shell: bash
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+      - run: npm test
+
+  build:
+    name: build assets
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        run: |
+          echo "::error::publishing happens only on a tag push; run this with dry_run checked"
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Version
+        id: v
+        run: |
+          set -eu
+          manifest="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test "$GITHUB_REF_NAME" = "$manifest" || { echo "::error::tag $GITHUB_REF_NAME does not match the manifests ($manifest)"; exit 1; }
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+      - name: Build (twice, must be byte-identical)
+        run: |
+          set -eu
+          node scripts/build-release.mjs --version "${{ steps.v.outputs.version }}" --out dist
+          node scripts/build-release.mjs --version "${{ steps.v.outputs.version }}" --out dist2 >/dev/null
+          diff dist/SHA256SUMS dist2/SHA256SUMS
+          cat dist/SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          node -e '
+            const v = process.argv[1].slice(1);
+            const t = require("fs").readFileSync("CHANGELOG.md", "utf8");
+            const i = t.indexOf(`## [${v}]`);
+            if (i < 0) { console.error(`CHANGELOG.md has no section for ${v}`); process.exit(1); }
+            const j = t.indexOf("\n## [", i + 1);
+            require("fs").writeFileSync("notes.md", t.slice(t.indexOf("\n", i) + 1, j < 0 ? undefined : j).trim() + "\n");
+          ' "${{ steps.v.outputs.version }}"
+          mv notes.md dist-notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.v.outputs.version }}
+          path: |
+            dist/
+            dist-notes.md
+          if-no-files-found: error
+
+  smoke-artifact:
+    name: installers on the built assets / ${{ matrix.os }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.version }}
+      - if: runner.os != 'Windows'
+        run: sh test/channels/install-sh.sh dist
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./test/channels/install-ps1.ps1 -Dist dist -Shell powershell
+
+  publish:
+    name: publish GitHub release
+    if: github.event_name == 'push'
+    needs: [build, smoke-artifact]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.version }}
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file dist-notes.md --verify-tag
+
+  smoke-release:
+    name: install from the published release / ${{ matrix.os }}
+    needs: [build, publish]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    env:
+      TAG: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: install.sh from the release (latest, then pinned), then uninstall
+        if: runner.os != 'Windows'
+        run: |
+          set -eu
+          export HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME"
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh" | sh -s -- --none
+          "$HOME/.local/bin/worktree-janitor" --help
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.sh" | sh -s -- --version "$TAG" --none
+          readlink "$HOME/.worktree-janitor/current" | grep -qx "$TAG"
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.sh" | sh -s -- --uninstall
+          test -z "$(find "$HOME" -type f)"
+      - name: install.ps1 from the release, then uninstall
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:WORKTREE_JANITOR_NO_USER_PATH = '1'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'lad'
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA | Out-Null
+          $src = irm "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:TAG/install.ps1"
+          & ([scriptblock]::Create($src)) -Version $env:TAG -None
+          & (Join-Path $env:LOCALAPPDATA 'worktree-janitor\bin\worktree-janitor.cmd') --help
+          if ($LASTEXITCODE -ne 0) { throw 'launcher failed' }
+          & ([scriptblock]::Create($src)) -Uninstall
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'worktree-janitor')) { throw 'left behind' }
+
+  formula:
+    name: pull request for Formula/worktree-janitor.rb
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      TAG: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Download the published SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir release
+      - name: Update the formula and open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          node scripts/update-formula.mjs --version "$TAG" --sums release/SHA256SUMS
+          if git diff --quiet; then echo "formula already points at $TAG"; exit 0; fi
+          branch="formula/$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "formula: worktree-janitor $TAG"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "formula: worktree-janitor $TAG" \
+            --body "Points Formula/worktree-janitor.rb at the $TAG release tarball (sha256 from the published SHA256SUMS). Pull requests opened with GITHUB_TOKEN do not trigger CI; close and reopen it to run the checks." \
+            || echo "::warning::could not open the pull request (Settings > Actions > General: allow GitHub Actions to create pull requests); the branch $branch is pushed"
