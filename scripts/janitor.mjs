@@ -573,7 +573,7 @@ export function scanTree(root, { lstat = (p) => fs.lstatSync(p), deadline = () =
   const stack = [root];
   let seen = 0;
   while (stack.length) {
-    const dir = stack.pop();
+    const dir = /** @type {string} */ (stack.pop()); // the loop condition guarantees an element
     let names;
     try {
       names = fs.readdirSync(nsPath(dir));
@@ -660,7 +660,8 @@ function removeLinkOnly(p) {
     done = !lstatOrNull(np);
   }
   if (!done || lstatOrNull(np)) throw new Error(`could not remove link ${p}`);
-  if (targetExisted && !fs.existsSync(target)) {
+  // targetExisted implies target !== null; tsc cannot follow that through a `let`.
+  if (targetExisted && !fs.existsSync(/** @type {string} */ (target))) {
     throw new SafetyError(`SAFETY: link target ${target} vanished after removing link ${p}`);
   }
   return { link: p, target, targetExisted };
@@ -965,7 +966,7 @@ class MergeOracle {
   /**
    * A merged PR whose head was exactly `tip`, via gh; null when none or gh is unusable.
    * @param {string} branch
-   * @param {string | undefined} tip
+   * @param {string} tip
    * @returns {MergedPr | null}
    */
   ghMergedPr(branch, tip) {
@@ -992,12 +993,12 @@ class MergeOracle {
   // -> { merged: boolean, ahead: number, reason: string }
   /**
    * @param {string} branch
-   * @param {string | undefined} tip  branch tip sha (undefined: unknown, compares as not merged)
+   * @param {string} tip  branch tip sha
    * @returns {Verdict}
    */
   check(branch, tip) {
     const key = `${branch}\0${tip}`;
-    if (this.cache.has(key)) return this.cache.get(key);
+    if (this.cache.has(key)) return /** @type {Verdict} */ (this.cache.get(key)); // has() just said so
     const res = this._check(branch, tip);
     this.cache.set(key, res);
     return res;
@@ -1005,7 +1006,7 @@ class MergeOracle {
 
   /**
    * @param {string} branch
-   * @param {string | undefined} tip
+   * @param {string} tip
    * @returns {Verdict}
    */
   _check(branch, tip) {
@@ -1091,7 +1092,7 @@ function janitor(opts, ctx) {
 
   /** @type {(b: string) => boolean} */
   const protectedBranch = (b) => b === baseLocal || PROTECTED_BRANCHES.has(b);
-  const cwdGuards = ctx.cwdGuards.filter(Boolean);
+  const cwdGuards = /** @type {string[]} */ (ctx.cwdGuards.filter(Boolean)); // filter(Boolean) drops the nulls
   let safetyAbort = false;
   let pruneNeeded = false;
 
@@ -1110,7 +1111,7 @@ function janitor(opts, ctx) {
     if (wt.locked) {
       const m = lockReason.match(CLAUDE_LOCK_RE);
       const pid = m ? Number(m[1]) : null;
-      if (m && !pidAlive(pid)) staleLock = true;
+      if (m && !pidAlive(/** @type {number} */ (pid))) staleLock = true; // m implies pid is a number
       else if (!opts.includeLocked) {
         return wtReport(wt, 'kept', m ? `locked by a live Claude Code process (pid ${pid})` : `locked${lockReason ? `: ${lockReason}` : ''}`);
       }
@@ -1136,7 +1137,10 @@ function janitor(opts, ctx) {
       return wtReport(wt, 'kept', `dirty: ${n} modified/untracked path(s)`);
     }
 
-    const tip = wt.head || branchTips.get(wt.branch);
+    // `worktree list --porcelain` prints a HEAD line for every non-bare
+    // worktree (all zeros when it cannot be resolved), so tip is a string;
+    // the branchTips fallback is defensive.
+    const tip = /** @type {string} */ (wt.head || branchTips.get(wt.branch));
     const verdict = oracle.check(wt.branch, tip);
     if (!verdict.merged) return wtReport(wt, 'kept', verdict.reason);
 
@@ -1255,7 +1259,8 @@ function removeWorktree(repo, wt) {
   if (registered) problems.push({ msg: `directory deleted but git still lists ${wt.path}; run git worktree prune`, safety: false });
 
   for (const r of res.links) {
-    if (r.targetExisted && !isInside(r.target, wt.path) && !fs.existsSync(r.target)) {
+    // targetExisted implies target !== null (see removeLinkOnly).
+    if (r.targetExisted && !isInside(/** @type {string} */ (r.target), wt.path) && !fs.existsSync(/** @type {string} */ (r.target))) {
       problems.push({ msg: `SAFETY: link target ${r.target} vanished during worktree removal`, safety: true });
     }
   }
@@ -1456,7 +1461,7 @@ async function main(argv) {
 }
 
 // Tests import this module for its pure helpers; they set this flag first.
-if (!globalThis.__WORKTREE_JANITOR_NO_MAIN__) {
+if (!(/** @type {{ __WORKTREE_JANITOR_NO_MAIN__?: boolean }} */ (globalThis)).__WORKTREE_JANITOR_NO_MAIN__) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     () => process.exit(process.argv.some((a) => a === '--hook' || a.startsWith('--hook=')) ? 0 : 1),
