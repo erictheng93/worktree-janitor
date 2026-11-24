@@ -116,8 +116,12 @@ async function makeRepo() {
   fs.mkdirSync(dir);
   const origin = path.join(dir, 'origin.git');
   const seed = path.join(dir, 'seed');
-  await git(dir, 'init', '--bare', '-b', 'main', origin);
-  await git(dir, 'init', '-b', 'main', seed);
+  // `init` + `symbolic-ref` rather than `init -b` (git 2.28+): the suite also
+  // runs on older git (ubuntu 20.04 has 2.25).
+  await git(dir, 'init', '-q', '--bare', origin);
+  await git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  await git(dir, 'init', '-q', seed);
+  await git(seed, 'symbolic-ref', 'HEAD', 'refs/heads/main');
   await git(seed, 'config', 'user.name', 'Test');
   await git(seed, 'config', 'user.email', 'test@example.invalid');
   fs.writeFileSync(path.join(seed, 'README.md'), 'hello\n');
