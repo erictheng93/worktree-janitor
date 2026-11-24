@@ -29,7 +29,11 @@ jobs:
           git config --global user.name "CI"
           git config --global user.email "ci@example.invalid"
           git config --global init.defaultBranch main
+      # The mount tests self-detect root or passwordless sudo (GitHub's ubuntu
+      # runners have it) and run `sudo -n mount`; on ubuntu they must run.
       - run: npm test
+        env:
+          JANITOR_REQUIRE_MOUNT_TESTS: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
 
   bun:
     name: bun / ubuntu-latest
@@ -50,3 +54,4 @@ jobs:
         run: npm test
         env:
           JANITOR_RUNTIME: bun
+          JANITOR_REQUIRE_MOUNT_TESTS: '1'

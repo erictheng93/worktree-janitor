@@ -777,6 +777,12 @@ const MOUNT = (() => {
   return { skip: false, run };
 })();
 
+// CI sets JANITOR_REQUIRE_MOUNT_TESTS on ubuntu, where passwordless sudo
+// exists, so the mount tests cannot silently turn into skips there.
+test('mount tests are runnable where CI requires them', { skip: !process.env.JANITOR_REQUIRE_MOUNT_TESTS && 'JANITOR_REQUIRE_MOUNT_TESTS not set' }, () => {
+  assert.equal(MOUNT.skip, false, `mount tests would be skipped: ${MOUNT.skip}`);
+});
+
 describe('mount points inside a worktree', { skip: MOUNT.skip, concurrency: 4 }, () => {
   // Mount, run `body`, always unmount (so the suite's cleanup never recurses
   // into a mount either).
