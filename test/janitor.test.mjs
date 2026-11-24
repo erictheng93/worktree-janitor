@@ -302,10 +302,11 @@ describe('worktree-janitor', { concurrency: 6 }, () => {
     const r = await makeRepo();
     const live = await mergedFeature(r, 'live', 'merge');
     const dead = await mergedFeature(r, 'dead', 'merge');
-    const deadPid = await new Promise((res) => {
-      const c = spawn(process.execPath, ['-e', '0']);
-      c.on('close', () => res(c.pid));
-    });
+    // A PID that cannot exist anywhere: odd (Windows PIDs are multiples of 4) and above the
+    // Linux (2^22) and macOS (99999) maxima. Reusing an exited child's PID was flaky on
+    // Windows, which recycles PIDs fast enough for the janitor's own git processes to get it.
+    const deadPid = 2147483645;
+    assert.throws(() => process.kill(deadPid, 0), (e) => e.code === 'ESRCH');
     await git(r.main, 'worktree', 'lock', '--reason', `claude agent agent-a1b2c3 (pid ${process.pid} start 1)`, live.wt);
     await git(r.main, 'worktree', 'lock', '--reason', `claude session dead (pid ${deadPid})`, dead.wt);
     const { json } = await runJson(r, ['--apply']);
