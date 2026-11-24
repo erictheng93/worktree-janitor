@@ -740,6 +740,17 @@ function readStdin(ms) {
 
 // ---------------------------------------------------------------- main
 
+// process.cwd() throws ENOENT on POSIX when the directory we were started in
+// has been deleted (e.g. a hook firing in a just-removed worktree). Windows
+// cannot delete a process's cwd, so this only bites on Linux/macOS.
+function safeCwd() {
+  try {
+    return process.cwd();
+  } catch {
+    return null;
+  }
+}
+
 async function main(argv) {
   let opts;
   const hookMode = argv.includes('--hook') || argv.some((a) => a.startsWith('--hook='));
@@ -773,10 +784,17 @@ async function main(argv) {
     if (payload && typeof payload.cwd === 'string' && payload.cwd) hookCwd = payload.cwd;
   }
 
-  const start = path.resolve(opts.repo || hookCwd || process.cwd());
+  const cwd = safeCwd();
+  const startRaw = opts.repo || hookCwd || cwd;
+  if (!startRaw || (!path.isAbsolute(startRaw) && !cwd)) {
+    if (opts.hook) return 0;
+    process.stderr.write('worktree-janitor: current directory no longer exists; pass an absolute --repo\n');
+    return 1;
+  }
+  const start = cwd ? path.resolve(cwd, startRaw) : path.resolve(startRaw);
   const ctx = {
     start,
-    cwdGuards: [process.cwd(), hookCwd],
+    cwdGuards: [cwd, hookCwd],
     ghTimeout: opts.hook ? 6000 : GH_TIMEOUT_MS,
   };
 
