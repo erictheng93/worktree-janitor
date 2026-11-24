@@ -1,4 +1,4 @@
-// Release assets (scripts/build-release.mjs).
+// Release assets (scripts/build-release.mjs) and the formula updater.
 // Run: node --test test/release.test.mjs
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { build, isRuntimePath, manifestVersion } from '../scripts/build-release.mjs';
+import { setUrlAndSha } from '../scripts/update-formula.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-release-'));
@@ -77,4 +78,15 @@ test('zip extracts with the system tool to the same files as the tarball', () =>
   if (t.status !== 0) return; // GNU tar cannot read zip; bsdtar (macOS, Windows) can
   const j = path.join(x, `worktree-janitor-${r.version}`, 'scripts', 'janitor.mjs');
   assert.equal(fs.readFileSync(j, 'utf8'), fs.readFileSync(path.join(REPO, 'scripts', 'janitor.mjs'), 'utf8'));
+});
+
+test('update-formula: replaces url and sha256, rejects bad input', () => {
+  const rb = fs.readFileSync(path.join(REPO, 'Formula', 'worktree-janitor.rb'), 'utf8');
+  const next = setUrlAndSha(rb, 'file:///tmp/w.tar.gz', 'a'.repeat(64));
+  assert.match(next, /^ {2}url "file:\/\/\/tmp\/w\.tar\.gz"$/m);
+  assert.match(next, new RegExp(`^ {2}sha256 "${'a'.repeat(64)}"$`, 'm'));
+  assert.equal(next.split('\n').length, rb.split('\n').length);
+  assert.throws(() => setUrlAndSha(rb, 'x', 'nope'), /not a sha256/);
+  assert.throws(() => setUrlAndSha(rb, 'a"b', 'a'.repeat(64)), /unexpected character/);
+  assert.match(rb, new RegExp(`releases/download/${manifestVersion()}/worktree-janitor-${manifestVersion()}\\.tar\\.gz"`), 'formula points at this version');
 });
