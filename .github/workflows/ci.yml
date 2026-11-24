@@ -24,6 +24,11 @@ jobs:
         # (macos-13 and macos-14 are no longer offered by GitHub.)
         os: [ubuntu-latest, macos-15, macos-26, macos-15-intel, windows-2022, windows-2025, windows-11-arm]
         node: [18, 20, 22]
+        exclude:
+          # setup-node has no Node 18 build for win32-arm64 ("Unable to find
+          # Node version '18' for platform win32 and architecture arm64").
+          - os: windows-11-arm
+            node: 18
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
