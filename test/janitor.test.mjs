@@ -871,24 +871,43 @@ describe('mount points inside a worktree', { skip: MOUNT.skip, concurrency: 4 },
 // the fallback. Otherwise these tests are skipped.
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+// Run an external tool for the mount helpers: never without a timeout (a hung
+// hdiutil / diskpart must fail the test, not stall the job), killed when it
+// expires. -> { ok, stdout, detail }, `detail` carrying the exit status and
+// all of stdout and stderr for error messages.
+const TOOL_TIMEOUT_MS = 60_000;
+function runTool(argv, { timeout = TOOL_TIMEOUT_MS } = {}) {
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout, killSignal: 'SIGKILL', windowsHide: true });
+  const output = [r.stdout, r.stderr].map((s) => (s || '').trim()).filter(Boolean).join(' / ');
+  const err = r.error ? (r.error.code === 'ETIMEDOUT' ? `timed out after ${timeout / 1000}s` : r.error.message) : null;
+  return {
+    ok: !r.error && r.status === 0,
+    stdout: r.stdout || '',
+    detail: `exit ${r.status}${r.signal ? `, signal ${r.signal}` : ''}${err ? `, ${err}` : ''}${output ? `: ${output}` : ''}`,
+  };
+}
+
 const HDI = (() => {
   if (process.platform !== 'darwin') return { skip: 'hdiutil mount tests are macOS-only' };
-  if (spawnSync('hdiutil', ['help'], { stdio: 'ignore' }).error) return { skip: 'hdiutil not found' };
-  const canSudo = spawnSync('sudo', ['-n', 'true'], { stdio: 'ignore' }).status === 0;
-  const exec = (sudo, args) => {
-    const argv = sudo ? ['sudo', '-n', 'hdiutil', ...args] : ['hdiutil', ...args];
-    const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(`${argv.join(' ')} failed: ${(r.stderr || r.stdout || String(r.error || '')).trim()}`);
+  if (spawnSync('hdiutil', ['help'], { stdio: 'ignore', timeout: TOOL_TIMEOUT_MS }).error) return { skip: 'hdiutil not found' };
+  const canSudo = spawnSync('sudo', ['-n', 'true'], { stdio: 'ignore', timeout: TOOL_TIMEOUT_MS }).status === 0;
+  let sudo = false;
+  const asUser = (argv) => (sudo ? ['sudo', '-n', ...argv] : argv);
+  const hdiutil = (args, { elevated = true } = {}) => {
+    const argv = elevated ? asUser(['hdiutil', ...args]) : ['hdiutil', ...args];
+    const r = runTool(argv);
+    if (!r.ok) throw new Error(`${argv.join(' ')} failed (${r.detail})`);
+    return r.stdout;
   };
   // hdiutil now and then fails transiently ("Resource temporarily
-  // unavailable", "resource busy"): retry a few times before giving up.
-  const retry = (fn, tries = 5) => {
-    for (let i = 1; ; i++) {
+  // unavailable", "resource busy"): retry with growing pauses.
+  const retry = (fn, delays) => {
+    for (let i = 0; ; i++) {
       try {
         return fn();
       } catch (e) {
-        if (i >= tries) throw e;
-        sleepSync(500 * i);
+        if (i >= delays.length) throw e;
+        sleepSync(delays[i]);
       }
     }
   };
@@ -897,57 +916,97 @@ const HDI = (() => {
   const SIZE = { 'HFS+': '8m', APFS: '32m' };
   const create = (fsType) => {
     const dmg = path.join(ROOT, `jt-${++n}.dmg`);
-    retry(() => exec(false, ['create', '-quiet', '-size', SIZE[fsType], '-fs', fsType, '-volname', `jt${n}`, '-type', 'UDIF', dmg]));
+    retry(() => hdiutil(['create', '-size', SIZE[fsType], '-fs', fsType, '-volname', `jt${n}`, '-type', 'UDIF', dmg], { elevated: false }), [500, 1000, 2000]);
     return dmg;
   };
-  let sudo = false;
+  // Mount point -> whole-disk device of the attached image (/dev/diskN). For
+  // APFS that disk carries the synthesized container: detaching it tears
+  // down the container and its volume too.
+  const devices = new Map();
   const attach = (dmg, mp) => {
     fs.mkdirSync(mp, { recursive: true });
-    retry(() => exec(sudo, ['attach', '-quiet', '-nobrowse', '-noautoopen', '-noverify', '-mountpoint', mp, dmg]));
+    const plist = retry(() => hdiutil(['attach', '-plist', '-nobrowse', '-noautoopen', '-noverify', '-mountpoint', mp, dmg]), [500, 1000, 2000]);
+    const dev = [...plist.matchAll(/<string>(\/dev\/disk\d+)<\/string>/g)].map((m) => m[1])[0] || null;
+    devices.set(mp, dev);
+    // Keep Spotlight off the volume, so it does not hold it busy on detach.
+    try {
+      fs.writeFileSync(path.join(mp, '.metadata_never_index'), '');
+    } catch {
+      /* read-only or vanished: the detach below still runs */
+    }
+    return dev;
   };
-  const detach = (mp) => retry(() => exec(sudo, ['detach', '-quiet', '-force', mp]));
+  // ~30 s of retries, then `diskutil unmountDisk force` and a last
+  // `hdiutil detach -force`. Throws, naming the device, if it stays attached.
+  const detach = (mp) => {
+    const dev = devices.get(mp) || null;
+    const target = dev || mp;
+    runTool(['sync']);
+    let last;
+    try {
+      retry(() => hdiutil(['detach', '-force', target]), [500, 1000, 2000, 3000, 5000, 8000, 10000]);
+      devices.delete(mp);
+      return;
+    } catch (e) {
+      last = e;
+    }
+    if (dev) runTool(asUser(['diskutil', 'unmountDisk', 'force', dev]));
+    try {
+      hdiutil(['detach', '-force', target]);
+      devices.delete(mp);
+    } catch (e) {
+      throw new Error(`could not detach ${target} (mounted at ${mp}): ${e.message}; first error: ${last.message}`);
+    }
+  };
 
-  // Probe: attach without sudo, then with `sudo -n`; the volume must be
-  // writable and on its own device.
-  const probe = path.join(ROOT, 'hdi-probe');
-  let dmg;
-  try {
-    dmg = create('HFS+');
-  } catch (e) {
-    return { skip: `hdiutil create does not work here (${e.message.split('\n')[0]})` };
-  }
+  // One probe of `fsType` at a fresh mount point: attach, write, check that
+  // the volume is its own device, detach. -> null, or { phase, message }.
+  let probes = 0;
+  const probeOnce = (fsType) => {
+    const mp = path.join(ROOT, `hdi-probe-${++probes}`);
+    let dmg;
+    try {
+      dmg = create(fsType);
+      attach(dmg, mp);
+    } catch (e) {
+      return { phase: 'attach', message: e.message };
+    }
+    let writeError = null;
+    try {
+      fs.writeFileSync(path.join(mp, 'probe.txt'), 'x');
+      if (fs.lstatSync(mp).dev === fs.lstatSync(ROOT).dev) throw new Error(`attached ${fsType} volume has the same st_dev as its parent`);
+    } catch (e) {
+      writeError = e.message;
+    }
+    try {
+      detach(mp);
+    } catch (e) {
+      return { phase: 'detach', message: e.message };
+    }
+    return writeError ? { phase: 'write', message: writeError } : null;
+  };
+  // A failed detach is retried with a whole new probe once; if that fails
+  // too, a probe volume may still be attached: fail loudly, never skip.
+  const probe = (fsType) => {
+    let res = probeOnce(fsType);
+    if (res && res.phase === 'detach') res = probeOnce(fsType);
+    if (res && res.phase === 'detach') throw new Error(`hdiutil ${fsType} probe: ${res.message}`);
+    return res;
+  };
+
+  // Attach without sudo, then with `sudo -n`; the volume must be writable
+  // and on its own device.
   const errors = [];
   for (const withSudo of canSudo ? [false, true] : [false]) {
     sudo = withSudo;
-    try {
-      attach(dmg, probe);
-    } catch (e) {
-      errors.push(e.message.split('\n')[0]);
+    const res = probe('HFS+');
+    if (res) {
+      errors.push(`${withSudo ? 'sudo ' : ''}${res.phase}: ${res.message.split('\n')[0]}`);
       continue;
     }
-    try {
-      fs.writeFileSync(path.join(probe, 'probe.txt'), 'x');
-      if (fs.lstatSync(probe).dev === fs.lstatSync(ROOT).dev) throw new Error('attached volume has the same st_dev as its parent');
-    } catch (e) {
-      errors.push(`${withSudo ? 'sudo ' : ''}attach: ${e.message}`);
-      detach(probe);
-      continue;
-    }
-    detach(probe);
     // The same probe for an APFS image, with the attach method that worked.
-    const fsSkip = { 'HFS+': false, APFS: false };
-    const apfsProbe = path.join(ROOT, 'hdi-probe-apfs');
-    try {
-      attach(create('APFS'), apfsProbe);
-      try {
-        fs.writeFileSync(path.join(apfsProbe, 'probe.txt'), 'x');
-        if (fs.lstatSync(apfsProbe).dev === fs.lstatSync(ROOT).dev) throw new Error('attached APFS volume has the same st_dev as its parent');
-      } finally {
-        detach(apfsProbe);
-      }
-    } catch (e) {
-      fsSkip.APFS = `APFS image does not work here (${e.message.split('\n')[0]})`;
-    }
+    const apfs = probe('APFS');
+    const fsSkip = { 'HFS+': false, APFS: apfs ? `APFS image does not work here (${apfs.phase}: ${apfs.message.split('\n')[0]})` : false };
     return { skip: false, sudo, create, attach, detach, fsSkip };
   }
   return { skip: `hdiutil attach does not work here (${errors.join('; ')})` };
@@ -1166,7 +1225,7 @@ async function assertDryRunKept(r, wt, re) {
 // created and attached with diskpart. Otherwise these tests are skipped.
 const WINVOL = (() => {
   if (!IS_WIN) return { skip: 'volume mount point tests are Windows-only' };
-  const ok = (cmd, args) => spawnSync(cmd, args, { stdio: 'ignore', windowsHide: true }).status === 0;
+  const ok = (cmd, args) => spawnSync(cmd, args, { stdio: 'ignore', windowsHide: true, timeout: TOOL_TIMEOUT_MS, killSignal: 'SIGKILL' }).status === 0;
   // `net session` and `fltmc` both succeed only in an elevated process.
   if (!ok('net', ['session']) && !ok('fltmc', [])) {
     return { skip: 'volume mount point tests need an elevated (administrator) process: net session and fltmc both failed' };
@@ -1176,7 +1235,7 @@ const WINVOL = (() => {
   const diskpart = (lines) => {
     const script = path.join(ROOT, `diskpart-${++n}.txt`);
     fs.writeFileSync(script, [...lines, 'exit', ''].join('\r\n'));
-    const r = spawnSync('diskpart', ['/s', script], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+    const r = spawnSync('diskpart', ['/s', script], { encoding: 'utf8', windowsHide: true, timeout: 120_000, killSignal: 'SIGKILL' });
     if (r.status !== 0) throw new Error(`diskpart (${lines.join(' | ')}) failed with ${r.status}: ${(r.stdout || '').trim().split(/\r?\n/).slice(-4).join(' / ')}${r.error ? ` ${r.error.message}` : ''}`);
     return r.stdout;
   };
@@ -1185,6 +1244,7 @@ const WINVOL = (() => {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 180_000,
+      killSignal: 'SIGKILL',
     });
     if (r.status !== 0) throw new Error(`powershell failed with ${r.status}: ${(r.stderr || r.stdout || String(r.error || '')).trim().split(/\r?\n/)[0]}`);
     return r.stdout.trim();
@@ -1246,7 +1306,7 @@ const WINVOL = (() => {
     return { vhdx, format };
   };
   // Remove the mount point (leaves an empty directory), detach, delete.
-  const unmount = (mp) => spawnSync('mountvol', [mp + path.sep, '/D'], { stdio: 'ignore', windowsHide: true });
+  const unmount = (mp) => spawnSync('mountvol', [mp + path.sep, '/D'], { stdio: 'ignore', windowsHide: true, timeout: TOOL_TIMEOUT_MS, killSignal: 'SIGKILL' });
   const detach = (vhdx) => diskpart([`select vdisk file="${vhdx}"`, 'detach vdisk']);
   const destroy = (vhdx) => {
     try {
@@ -1337,7 +1397,7 @@ for (const fsType of ['ntfs', 'refs']) {
       const mp = path.join(wt, 'node_modules');
       const vhdx = await withVolume(mp, PRECIOUS, async (format) => {
         const scan = lib.scanTree(wt, { deadline: () => Infinity });
-        const osv = spawnSync('cmd', ['/d', '/c', 'ver'], { encoding: 'utf8' }).stdout.trim();
+        const osv = (spawnSync('cmd', ['/d', '/c', 'ver'], { encoding: 'utf8', timeout: TOOL_TIMEOUT_MS }).stdout || '').trim();
         record(t, `${format} volume mount point (${osv}, ${process.arch}, node ${process.version})`, {
           worktreeRoot: nodeView(wt).lstat,
           mountPoint: nodeView(mp),
