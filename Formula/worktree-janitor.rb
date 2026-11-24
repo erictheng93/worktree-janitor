@@ -57,7 +57,7 @@ class WorktreeJanitor < Formula
       system "git", "-C", testpath/"wt", "commit", "-q", "-m", "b"
       system "git", "merge", "-q", "--no-ff", "-m", "merge", "merged"
       system "git", "push", "-q", "origin", "main"
-      assert_match "would-remove", shell_output("#{bin}/worktree-janitor")
+      assert_match "would-remove", shell_output(bin/"worktree-janitor")
       assert_path_exists testpath/"wt"
     end
   end
