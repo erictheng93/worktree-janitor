@@ -11,7 +11,7 @@ class WorktreeJanitor < Formula
     libexec.install Dir["*"], ".claude-plugin", ".codex-plugin", ".agents"
     (bin/"worktree-janitor").write <<~SH
       #!/bin/sh
-      exec "#{Formula["node"].opt_bin}/node" "#{opt_libexec}/scripts/janitor.mjs" "$@"
+      exec "#{formula_opt_bin("node")}/node" "#{opt_libexec}/scripts/janitor.mjs" "$@"
     SH
   end
 
@@ -30,8 +30,8 @@ class WorktreeJanitor < Formula
           codex plugin add worktree-janitor@worktree-janitor-marketplace
 
         Codex hooks that run this Homebrew copy:
-          #{Formula["node"].opt_bin}/node #{opt_libexec}/scripts/install.mjs --codex \\
-            --node #{Formula["node"].opt_bin}/node
+          #{formula_opt_bin("node")}/node #{opt_libexec}/scripts/install.mjs --codex \\
+            --node #{formula_opt_bin("node")}/node
         (remove them again with --codex --uninstall before `brew uninstall`)
     EOS
   end
