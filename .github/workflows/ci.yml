@@ -62,6 +62,19 @@ jobs:
         env:
           JANITOR_REQUIRE_MOUNT_TESTS: '1'
 
+  # JSDoc types checked by tsc (devDependencies only; the test jobs above
+  # never install them, so the runtime stays dependency-free).
+  typecheck:
+    name: typecheck / ubuntu-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run typecheck
+
   bun:
     name: bun / ubuntu-latest
     runs-on: ubuntu-latest
