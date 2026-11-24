@@ -1018,10 +1018,19 @@ const PRECIOUS = { 'data.txt': 'do-not-delete\n', 'sub/more.txt': 'more\n' };
 // volume that a directory walk could notice by its st_dev.
 const PRECIOUS_FLAT = { 'data.txt': 'do-not-delete\n', 'more.txt': 'more\n' };
 
+// fsync'd: the image / VHDX is detached right after the test and re-attached
+// to check its contents, and a Dev Drive (ReFS, Server 2025) otherwise loses
+// the cached file data on detach (the files come back as NUL bytes).
 function writeFiles(dir, files) {
   for (const [name, content] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
-    fs.writeFileSync(path.join(dir, name), content);
+    const fd = fs.openSync(path.join(dir, name), 'w');
+    try {
+      fs.writeSync(fd, content);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 }
 function assertFiles(dir, files) {
@@ -1245,9 +1254,11 @@ const WINVOL = (() => {
     } catch {
       /* not attached */
     }
-    fs.rmSync(vhdx, { force: true });
+    // The virtual disk service can hold the file for a moment after a detach.
+    fs.rmSync(vhdx, { force: true, maxRetries: 20, retryDelay: 500 });
   };
-  // Re-attach a detached VHDX at `mp` (no drive letter) for `body`.
+  // Re-attach a detached VHDX at `mp` (no drive letter) for `body`, detached
+  // again with the same API that attached it.
   const reattach = (vhdx, mp, body) => {
     fs.mkdirSync(mp, { recursive: true });
     powershell(`Mount-DiskImage -ImagePath ${psq(vhdx)} -NoDriveLetter | Out-Null`);
@@ -1259,7 +1270,7 @@ const WINVOL = (() => {
         unmount(mp);
       }
     } finally {
-      detach(vhdx);
+      powershell(`Dismount-DiskImage -ImagePath ${psq(vhdx)} | Out-Null`);
     }
   };
 
@@ -1334,11 +1345,14 @@ for (const fsType of ['ntfs', 'refs']) {
           dirOnVolume: nodeView(path.join(mp, 'sub')).lstat,
           scanTree: { links: scan.links, foreignDev: scan.foreignDev, unreadable: scan.unreadable },
         });
-        // The mount point itself must be what the janitor reports.
-        assert.ok(
-          scan.links.map(canon).includes(canon(mp)) || scan.foreignDev.map(canon).includes(canon(mp)),
-          `scanTree reports the mount point itself (links: ${scan.links}, foreignDev: ${scan.foreignDev})`,
-        );
+        // lstat does not report the mount point as a link (readlink fails with
+        // EINVAL: libuv only treats \??\X:\ junctions as links), but its st_dev
+        // is the mounted volume's serial number: scanTree reports the mount
+        // point itself as on another device, and does not descend into it.
+        assert.equal(fs.lstatSync(mp).isSymbolicLink(), false);
+        assert.notEqual(fs.lstatSync(mp).dev, fs.lstatSync(wt).dev, 'mount point is on another device');
+        assert.deepEqual(scan.foreignDev.map(canon), [canon(mp)]);
+        assert.deepEqual(scan.links, []);
       });
       assertVolumeHolds(vhdx, PRECIOUS);
     });
