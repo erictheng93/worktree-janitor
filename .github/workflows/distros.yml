@@ -1,0 +1,166 @@
+name: Linux distros
+
+# The suite on the distributions people actually run, each with its own git,
+# util-linux and (where it is new enough) its own Node.js. The containers are
+# privileged so the Linux mount suite runs as root; a second run as a plain
+# user without sudo checks that everything except the mount suite passes there.
+#
+# All containers share the Ubuntu runner's kernel: SELinux is not enforcing in
+# any of them, so the Red Hat images exercise RHEL userland (git, coreutils,
+# util-linux, glibc), not RHEL's kernel or its SELinux policy.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Official tarball for distros whose packaged Node.js is older than 18.
+  NODE_TARBALL_VERSION: 20.18.1
+  NODE_TARBALL_SHA256: c6fa75c841cbffac851678a472f2a5bd612fff8308ef39236190e1f8dbb0e567
+
+jobs:
+  distro:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ${{ matrix.image }}
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          # Debian family
+          - debian:11 # git 2.30: no `locked` line in `worktree list --porcelain` (added in 2.31)
+          - debian:12
+          - ubuntu:20.04 # git 2.25
+          - ubuntu:22.04
+          - ubuntu:24.04
+          # Red Hat family (UBI = RHEL userland)
+          - rockylinux:8
+          - rockylinux:9
+          - almalinux:8
+          - registry.access.redhat.com/ubi8/ubi
+          - registry.access.redhat.com/ubi9/ubi
+          - quay.io/centos/centos:stream9
+          - quay.io/centos/centos:stream10
+    steps:
+      - name: Install git, Node.js and util-linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          node_tarball() {
+            curl -fsSL "https://nodejs.org/dist/v$NODE_TARBALL_VERSION/node-v$NODE_TARBALL_VERSION-linux-x64.tar.xz" -o /tmp/node.tar.xz
+            echo "$NODE_TARBALL_SHA256  /tmp/node.tar.xz" | sha256sum -c -
+            tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner
+            echo "node source: official tarball v$NODE_TARBALL_VERSION"
+          }
+          case "$ID" in
+            debian|ubuntu)
+              export DEBIAN_FRONTEND=noninteractive
+              if [ "$ID:$VERSION_ID" = debian:11 ]; then
+                # bullseye LTS ended 2026-08-31; its packages now live only on archive.debian.org.
+                echo 'deb http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
+                echo 'deb http://archive.debian.org/debian bullseye-updates main' >> /etc/apt/sources.list
+                echo 'deb http://archive.debian.org/debian-security bullseye-security main' >> /etc/apt/sources.list
+              fi
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends git ca-certificates curl xz-utils util-linux mount passwd >/dev/null
+              case "$ID:$VERSION_ID" in
+                debian:12|ubuntu:24.04)
+                  apt-get install -y -qq --no-install-recommends nodejs npm >/dev/null
+                  echo "node source: distro apt package" ;;
+                *) node_tarball ;; # debian 11 ships Node 12, ubuntu 20.04 Node 10, ubuntu 22.04 Node 12
+              esac
+              ;;
+            rocky|almalinux|rhel|centos)
+              dnf install -y -q git util-linux shadow-utils tar xz >/dev/null
+              if [ "${VERSION_ID%%.*}" -ge 10 ]; then
+                dnf install -y -q nodejs npm >/dev/null
+                echo "node source: distro dnf package"
+              else
+                dnf module install -y -q nodejs:20/common >/dev/null
+                echo "node source: dnf module nodejs:20"
+              fi
+              ;;
+            *) echo "unexpected distro: $ID" >&2; exit 1 ;;
+          esac
+
+      # After git is installed, so checkout makes a real clone.
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        shell: bash
+        run: |
+          . /etc/os-release
+          echo "os:     $PRETTY_NAME"
+          echo "kernel: $(uname -r)"
+          echo "git:    $(git --version)"
+          echo "node:   $(node --version)"
+          echo "npm:    $(npm --version)"
+          echo "mount:  $(mount --version | head -n 1)"
+          echo "selinux: $(cat /sys/fs/selinux/enforce 2>/dev/null || echo 'not enforcing here (host kernel without SELinux)')"
+
+      - name: npm test as root (mount suite required)
+        shell: bash
+        env:
+          JANITOR_REQUIRE_MOUNT_TESTS: '1'
+        run: npm test
+
+      - name: npm test as a non-root user without sudo (mount suite skips)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null; then echo "sudo is installed; this run would not be sudo-less" >&2; exit 1; fi
+          useradd -m janitortest
+          cp -r "$GITHUB_WORKSPACE" /home/janitortest/src
+          chown -R janitortest: /home/janitortest/src
+          runuser -u janitortest -- env -u JANITOR_REQUIRE_MOUNT_TESTS HOME=/home/janitortest \
+            bash -c 'cd ~/src && npm test' 2>&1 | tee /tmp/user.log
+          grep -q '# SKIP mount tests need root or passwordless sudo' /tmp/user.log
+
+  # git 1.8.3 has no `git worktree`. The janitor must refuse (exit 1 by hand,
+  # exit 0 in hook mode) and delete nothing. CentOS 7's glibc 2.17 cannot run
+  # the actions' own Node, so this job drives the container with docker run.
+  centos7-unsupported:
+    name: centos:7 (expected unsupported, git 1.8.3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Janitor refuses cleanly and deletes nothing
+        run: |
+          docker run --rm -v "$PWD:/src:ro" centos:7 bash -c '
+            set -euo pipefail
+            # CentOS 7 is EOL; its packages live only on vault.centos.org.
+            sed -i -e "s/^mirrorlist=/#mirrorlist=/" -e "s|^#\?baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|" /etc/yum.repos.d/CentOS-*.repo
+            yum install -y -q git xz >/dev/null
+            # Official Node builds need glibc 2.28; this is the glibc 2.17 build.
+            curl -fsSL https://unofficial-builds.nodejs.org/download/release/v18.20.4/node-v18.20.4-linux-x64-glibc-217.tar.xz -o /tmp/node.tar.xz
+            echo "2e3b9693fb46a0096aa4bf11d5086834126d780d0422b613a5c6f6f981b18037  /tmp/node.tar.xz" | sha256sum -c -
+            tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner
+            . /etc/os-release; echo "os: $PRETTY_NAME | $(git --version) | node $(node --version)"
+            export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+            cd /tmp && git init -q --bare origin.git && git init -q repo && cd repo
+            echo a > a && git add a && git commit -qm init && git remote add origin ../origin.git && git push -q origin master
+            git checkout -qb merged && echo b > b && git add b && git commit -qm b
+            git checkout -q master && git merge -q --no-ff -m merge merged && git push -q origin master
+            set +e
+            node /src/scripts/janitor.mjs --apply > out.txt 2> err.txt; manual=$?
+            echo "{\"cwd\":\"$PWD\"}" | node /src/scripts/janitor.mjs --hook session-start > hook.txt 2>&1; hook=$?
+            set -e
+            cat err.txt
+            echo "manual exit $manual, hook exit $hook"
+            test "$manual" = 1
+            test "$hook" = 0
+            grep -q "git 2.7 or newer is required" err.txt
+            test ! -s hook.txt
+            git rev-parse --verify -q refs/heads/merged >/dev/null || { echo "merged branch was deleted" >&2; exit 1; }
+            echo "refused cleanly; nothing deleted"
+          '
