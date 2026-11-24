@@ -14,7 +14,9 @@ jobs:
     name: node ${{ matrix.node }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     # A hung disk tool must fail the job, not hold a runner for six hours.
-    timeout-minutes: 30
+    # windows-11-arm gets more: one node 20 run there took 26 minutes (the
+    # diskpart/VHDX steps were ~4x slower than on another arm64 runner).
+    timeout-minutes: ${{ matrix.os == 'windows-11-arm' && 45 || 30 }}
     strategy:
       fail-fast: false
       matrix:
