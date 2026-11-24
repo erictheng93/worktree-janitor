@@ -33,9 +33,12 @@ fail() {
   exit 1
 }
 step() { echo "--- $*"; }
-# Every file and link under HOME with its content hash or link target.
+# Every file and link under HOME with its content hash or link target,
+# except what other tools keep there (gh, called by the janitor, writes
+# ~/.local/state/gh and ~/.config/gh).
+ours() { grep -v -e '^\./\.local/state/gh/' -e '^\./\.config/gh/' || true; }
 snapshot() {
-  (cd "$HOME" && find . \( -type f -o -type l \) | LC_ALL=C sort | while read -r f; do
+  (cd "$HOME" && find . \( -type f -o -type l \) | ours | LC_ALL=C sort | while read -r f; do
     if [ -L "$f" ]; then echo "$f -> $(readlink "$f")"; else echo "$f $(cksum <"$f")"; fi
   done)
 }
@@ -59,6 +62,10 @@ make_repo() {
     (cd ../wt-open && echo c >c && git add c && git commit -qm c)
   )
 }
+
+step "--dry-run on a fresh machine changes nothing"
+sh "$INSTALL" --none --dry-run
+[ -z "$(snapshot)" ] || fail "fresh --dry-run wrote files: $(snapshot)"
 
 step "install.sh $VERSION --none (version from the latest-release endpoint)"
 sh "$INSTALL" --none
@@ -143,6 +150,10 @@ chmod +x "$WORK/fakebin/claude" "$WORK/fakebin/codex"
 # A user hooks.json with a hook of their own: ours is added next to it.
 printf '{\n  "hooks": {\n    "Stop": [ { "hooks": [ { "type": "command", "command": "true" } ] } ]\n  }\n}\n' >"$CODEX_HOME/hooks.json"
 cp "$CODEX_HOME/hooks.json" "$WORK/hooks.orig.json"
+before=$(snapshot)
+PATH="$WORK/fakebin:$HOME/.local/bin:$CLEAN_PATH" sh "$INSTALL" --dry-run || fail "fresh --dry-run with integrations failed"
+[ "$(snapshot)" = "$before" ] || fail "fresh --dry-run with integrations changed files"
+[ ! -e "$WORK/claude-state.json" ] || node -e 'process.exit(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).calls.length ? 1 : 0)' "$WORK/claude-state.json" || fail "--dry-run ran a claude command that changes something"
 PATH="$WORK/fakebin:$HOME/.local/bin:$CLEAN_PATH" sh "$INSTALL"
 grep -q "plugin marketplace add $HOME/.worktree-janitor/current" "$WORK/claude-state.json" || fail "claude marketplace not added at current: $(cat "$WORK/claude-state.json")"
 grep -q "$HOME/.worktree-janitor/current/scripts/janitor.mjs" "$CODEX_HOME/hooks.json" || fail "codex hooks do not point at current"
@@ -174,10 +185,10 @@ PATH="$WORK/fakebin:$HOME/.local/bin:$CLEAN_PATH" sh "$INSTALL" >/dev/null
 
 step "uninstall with the integrations"
 PATH="$WORK/fakebin:$HOME/.local/bin:$CLEAN_PATH" sh "$INSTALL" --uninstall
-cmp "$CODEX_HOME/hooks.json" "$WORK/hooks.orig.json" || fail "hooks.json not restored"
+[ "$(cksum <"$CODEX_HOME/hooks.json")" = "$(cksum <"$WORK/hooks.orig.json")" ] || fail "hooks.json not restored"
 node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (s.markets.length || s.plugins.length) process.exit(1)' "$WORK/claude-state.json" || fail "claude plugin left: $(cat "$WORK/claude-state.json")"
 rm -f "$CODEX_HOME/hooks.json"
-left=$(cd "$HOME" && find . -type f -o -type l)
+left=$(cd "$HOME" && find . -type f -o -type l | ours)
 [ -z "$left" ] || fail "left behind: $left"
 
 echo "install.sh: all checks passed"

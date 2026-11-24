@@ -104,6 +104,12 @@ function New-TestRepo([string]$Root) {
 try {
   Write-Host "installer shell: $ShellExe ($(& $ShellExe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'))"
 
+  Step '-DryRun on a fresh machine changes nothing'
+  $before = Get-Snapshot
+  $r = Invoke-Installer @('-None', '-DryRun')
+  if ($r[0] -ne 0) { Fail 'fresh -DryRun failed' }
+  Assert-Same $before 'fresh -DryRun changed files'
+
   Step "install.ps1 $Version -None (version from the latest-release endpoint)"
   $r = Invoke-Installer @('-None')
   if ($r[0] -ne 0) { Fail "install exited $($r[0])" }
@@ -114,7 +120,7 @@ try {
   if (Test-Path -LiteralPath $env:CODEX_HOME) { Fail '-None touched CODEX_HOME' }
   if (-not $SkipUserPath) {
     $up = Get-UserPathRaw
-    if (($up.Split(';') | Where-Object { $_ -ieq $BinDir }).Count -ne 1) { Fail "user PATH does not hold $BinDir once: $up" }
+    if (@($up.Split(';') | Where-Object { $_ -ieq $BinDir }).Count -ne 1) { Fail "user PATH does not hold $BinDir once: $up" }
     if (((Get-Item -LiteralPath 'HKCU:\Environment').GetValueKind('Path') -ne 'ExpandString') -and ($UserPathBefore -match '%')) { Fail 'user PATH lost REG_EXPAND_SZ' }
   }
 
@@ -211,6 +217,10 @@ process.stdout.write(out);
   [IO.File]::WriteAllText((Join-Path $fake 'codex.cmd'), "@echo codex-cli 0.0.0-fake`r`n")
   New-Item -ItemType Directory -Path $env:CODEX_HOME | Out-Null
   $env:Path = "$fake;$CleanPath"
+  $before = Get-Snapshot
+  $r = Invoke-Installer @('-DryRun')
+  if ($r[0] -ne 0) { Fail 'fresh -DryRun with integrations failed' }
+  Assert-Same $before 'fresh -DryRun with integrations changed files'
   $r = Invoke-Installer @()
   if ($r[0] -ne 0) { Fail 'install with integrations failed' }
   $cfg = Get-Content -LiteralPath (Join-Path $env:CODEX_HOME 'config.toml') -Raw
