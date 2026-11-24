@@ -1,0 +1,260 @@
+name: Install channels
+
+# Every installation channel, end to end, against release assets built from
+# this commit (no published release needed):
+#   install.sh   ubuntu, macOS arm64 + x64, debian:12 and rockylinux:9 (as a
+#                non-root user without sudo)
+#   install.ps1  windows-2022 / windows-2025, under Windows PowerShell 5.1 and
+#                PowerShell 7
+#   Homebrew     the formula installed from a throwaway tap with a file:// url
+#                (macOS, Linux), brew test, brew audit, and the real tap layout
+#   Claude Code  the real claude CLI with a throwaway CLAUDE_CONFIG_DIR: local
+#                marketplace (install.sh), and the GitHub marketplace pinned to
+#                this branch; SessionStart must remove a merged worktree
+#   Codex CLI    the real codex CLI with a throwaway CODEX_HOME: plugin from
+#                the local marketplace and from GitHub with --ref; the plugin's
+#                hook commands run the way Codex runs them
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assets:
+    name: build release assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build twice, byte-identical
+        run: |
+          node scripts/build-release.mjs --out dist
+          node scripts/build-release.mjs --out dist2 >/dev/null
+          diff dist/SHA256SUMS dist2/SHA256SUMS
+          cat dist/SHA256SUMS
+          tar -tzvf dist/worktree-janitor-v*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  install-sh:
+    name: install.sh / ${{ matrix.os }}
+    needs: assets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Shells available
+        run: for s in sh bash zsh dash; do command -v "$s" || true; done
+      - run: sh test/channels/install-sh.sh dist
+
+  install-sh-distro:
+    name: install.sh / ${{ matrix.image }} (non-root)
+    needs: assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12, rockylinux:9]
+    steps:
+      - name: Install git and Node.js from the distribution
+        run: |
+          set -eu
+          . /etc/os-release
+          case "$ID" in
+            debian) apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git nodejs ca-certificates >/dev/null ;;
+            rocky) dnf install -y -q git tar >/dev/null && dnf module install -y -q nodejs:20/common >/dev/null ;;
+          esac
+          echo "$PRETTY_NAME | $(git --version) | node $(node --version)"
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: install.sh as a user without sudo
+        run: |
+          set -eu
+          useradd -m tester
+          if command -v sudo >/dev/null; then echo "sudo is present" >&2; exit 1; fi
+          cp -r "$GITHUB_WORKSPACE" /home/tester/src
+          chown -R tester: /home/tester/src
+          runuser -u tester -- sh -c 'cd ~/src && sh test/channels/install-sh.sh dist'
+
+  install-ps1:
+    name: install.ps1 / ${{ matrix.os }} / ${{ matrix.shell }}
+    needs: assets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: install.ps1 under ${{ matrix.shell }}
+        shell: pwsh
+        run: ./test/channels/install-ps1.ps1 -Dist dist -Shell ${{ matrix.shell }}
+
+  homebrew:
+    name: Homebrew / ${{ matrix.os }}
+    needs: assets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_ENV_HINTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Put brew on PATH (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          test -x /home/linuxbrew/.linuxbrew/bin/brew
+          echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
+          echo /home/linuxbrew/.linuxbrew/sbin >> "$GITHUB_PATH"
+      - name: Homebrew version
+        run: brew --version
+      - name: Formula style and strict audit (the formula as committed)
+        run: |
+          set -eu
+          # The real tap layout: this repository, Formula/ at the root.
+          brew tap erictheng93/worktree-janitor "$GITHUB_WORKSPACE"
+          brew info erictheng93/worktree-janitor/worktree-janitor
+          brew style erictheng93/worktree-janitor/worktree-janitor
+          brew audit --strict erictheng93/worktree-janitor/worktree-janitor
+          brew untap erictheng93/worktree-janitor
+      - name: Install from a throwaway tap (url = the tarball built from this commit)
+        run: |
+          set -eu
+          brew tap-new --no-git local/wjtest
+          TAP=$(brew --repository local/wjtest)
+          node scripts/update-formula.mjs --sums dist/SHA256SUMS --url "file://$PWD/$(ls dist/worktree-janitor-v*.tar.gz)" --out "$TAP/Formula/worktree-janitor.rb"
+          grep -E '^  (url|sha256) ' "$TAP/Formula/worktree-janitor.rb"
+          brew install --build-from-source local/wjtest/worktree-janitor
+          brew test local/wjtest/worktree-janitor
+          brew audit --strict local/wjtest/worktree-janitor || echo "::warning::audit of the file:// variant reported the issues above (expected for a local url)"
+      - name: Use it
+        run: |
+          set -eu
+          command -v worktree-janitor
+          head -n 3 "$(command -v worktree-janitor)"
+          worktree-janitor --help | grep -q 'remove git worktrees'
+          # Works with node off PATH (absolute opt node in the wrapper).
+          env PATH=/usr/bin:/bin "$(command -v worktree-janitor)" --help >/dev/null
+          brew info local/wjtest/worktree-janitor | tee info.txt
+          grep -q 'claude plugin marketplace add erictheng93/worktree-janitor@v' info.txt
+      - name: Codex hooks for the Homebrew copy (throwaway CODEX_HOME) survive a reinstall
+        run: |
+          set -eu
+          export HOME="$RUNNER_TEMP/brewhome" CODEX_HOME="$RUNNER_TEMP/brewhome/.codex"
+          mkdir -p "$CODEX_HOME"
+          LIBEXEC="$(brew --prefix)/opt/worktree-janitor/libexec"
+          NODE="$(brew --prefix)/opt/node/bin/node"
+          "$NODE" "$LIBEXEC/scripts/install.mjs" --codex --node "$NODE"
+          grep -F "$LIBEXEC/scripts/janitor.mjs" "$CODEX_HOME/config.toml"
+          if grep -q Cellar "$CODEX_HOME/config.toml"; then echo "hooks point into the versioned Cellar" >&2; exit 1; fi
+          cp "$CODEX_HOME/config.toml" before.toml
+          brew reinstall --build-from-source local/wjtest/worktree-janitor
+          "$NODE" "$LIBEXEC/scripts/install.mjs" --codex --node "$NODE" | grep 'already installed'
+          cmp before.toml "$CODEX_HOME/config.toml"
+          "$NODE" "$LIBEXEC/scripts/install.mjs" --codex --uninstall
+          test ! -e "$CODEX_HOME/config.toml"
+      - name: Uninstall leaves nothing
+        run: |
+          set -eu
+          brew uninstall worktree-janitor
+          test ! -e "$(brew --prefix)/bin/worktree-janitor"
+          test ! -e "$(brew --prefix)/opt/worktree-janitor"
+          brew untap local/wjtest
+
+  claude:
+    name: Claude Code CLI / ${{ matrix.os }}
+    needs: assets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Install the claude CLI
+        run: npm install -g @anthropic-ai/claude-code && claude --version
+      - name: Local marketplace (install.sh / install.ps1 --claude) and the GitHub marketplace pinned to this ref
+        env:
+          REF: ${{ github.head_ref || github.ref_name }}
+        run: node test/channels/claude-real.mjs dist "$GITHUB_REPOSITORY" "$REF"
+
+  codex:
+    name: Codex CLI / ${{ matrix.os }}
+    needs: assets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the codex CLI
+        run: npm install -g @openai/codex && codex --version
+      - name: Plugin from the local and the GitHub marketplace; its hooks run as Codex runs them
+        env:
+          REF: ${{ github.head_ref || github.ref_name }}
+        run: node test/channels/codex-real.mjs "$GITHUB_WORKSPACE" "$GITHUB_REPOSITORY" "$REF"
