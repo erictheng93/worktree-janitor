@@ -1,0 +1,27 @@
+{
+  "_comment": "Hook payloads captured from Codex CLI 0.172.0 on Windows 11 (hook command run as powershell.exe -NoProfile -Command \"...\"). Ids are redacted; tests replace __CWD__ with a real path.",
+  "sessionStart": {
+    "session_id": "00000000-0000-0000-0000-000000000000",
+    "transcript_path": null,
+    "cwd": "__CWD__",
+    "hook_event_name": "SessionStart",
+    "model": "gpt-6.2-astra",
+    "permission_mode": "bypassPermissions",
+    "source": "startup"
+  },
+  "postToolUse": {
+    "session_id": "00000000-0000-0000-0000-000000000000",
+    "turn_id": "00000000-0000-0000-0000-000000000001",
+    "transcript_path": null,
+    "cwd": "__CWD__",
+    "hook_event_name": "PostToolUse",
+    "model": "gpt-6.2-astra",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git status"
+    },
+    "tool_response": "On branch master\nnothing to commit, working tree clean\n",
+    "tool_use_id": "call_redacted"
+  }
+}

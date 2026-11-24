@@ -431,6 +431,68 @@ describe('worktree-janitor', { concurrency: 6 }, () => {
     assert.equal(fs.existsSync(wt), false);
   });
 
+  test('--hook post-tool-use: Codex payload shapes (captured fixture, argv array, wrappers) act', async () => {
+    const r = await makeRepo();
+    const env = { FAKE_GH_DATA: r.ghData };
+    const fixture = JSON.parse(fs.readFileSync(path.join(path.dirname(JANITOR), '..', 'test', 'fixtures', 'codex-0.172-windows.json'), 'utf8'));
+    const withCommand = (command) => JSON.stringify({ ...fixture.postToolUse, cwd: r.main, tool_input: { command } });
+    // The captured payload itself ran `git status`: nothing happens.
+    const { wt: idle } = await mergedFeature(r, 'cx0', 'merge');
+    let res = await janitor(['--hook', 'post-tool-use'], { cwd: r.dir, input: JSON.stringify({ ...fixture.postToolUse, cwd: r.main }), env });
+    assert.equal(res.code, 0);
+    assert.equal(res.stdout, '');
+    assert.ok(fs.existsSync(idle));
+    const shapes = [
+      ['plain string (Codex 0.172)', 'gh pr merge 7 --squash --delete-branch'],
+      ['argv array', ['bash', '-lc', 'gh pr merge 5 --merge']],
+      ['bash -lc wrapper string', 'bash -lc "gh pr merge 5 --rebase"'],
+      ['powershell wrapper string', `"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'gh pr merge 5'`],
+      ['gh.exe', 'gh.exe pr merge 9'],
+    ];
+    for (const [label, command] of shapes) {
+      // Each shape gets a fresh merged worktree; the first run also removes cx0.
+      const { wt } = await mergedFeature(r, `cx${shapes.findIndex((s) => s[0] === label) + 1}`, 'merge');
+      res = await janitor(['--hook', 'post-tool-use'], { cwd: r.dir, input: withCommand(command), env });
+      assert.equal(res.code, 0, label);
+      assert.match(res.stdout, /removed \d merged worktree/, label);
+      assert.equal(fs.existsSync(wt), false, label);
+    }
+  });
+
+  test('--hook post-tool-use: odd payload shapes never throw and do nothing', async () => {
+    const r = await makeRepo();
+    const { wt } = await mergedFeature(r, 'odd', 'merge');
+    const odd = [
+      'null',
+      '42',
+      '"gh pr merge 1"',
+      JSON.stringify(['gh pr merge 1']),
+      JSON.stringify({ tool_input: null, cwd: r.main }),
+      JSON.stringify({ tool_input: 7, cwd: r.main }),
+      JSON.stringify({ tool_input: { command: { nested: 'gh pr merge 1' } }, cwd: r.main }),
+      JSON.stringify({ tool_input: { command: [1, null, { a: 'gh pr merge' }] }, cwd: r.main }),
+      JSON.stringify({ tool_input: { command: 'gh pr view 1' }, tool_response: { stdout: 'gh pr merge' }, cwd: r.main }),
+      JSON.stringify({ tool_input: { command: 'echo ghpr merge' }, cwd: 12 }),
+    ];
+    for (const input of odd) {
+      const res = await janitor(['--hook', 'post-tool-use'], { cwd: r.main, input, env: { FAKE_GH_DATA: r.ghData } });
+      assert.equal(res.code, 0, input);
+      assert.equal(res.stdout, '', input);
+      assert.equal(res.stderr, '', input);
+      assert.ok(fs.existsSync(wt), input);
+    }
+  });
+
+  test('--hook session-start: Codex SessionStart payload (captured fixture) acts', async () => {
+    const r = await makeRepo();
+    const fixture = JSON.parse(fs.readFileSync(path.join(path.dirname(JANITOR), '..', 'test', 'fixtures', 'codex-0.172-windows.json'), 'utf8'));
+    const { wt } = await mergedFeature(r, 'cxss', 'merge');
+    const res = await janitor(['--hook', 'session-start'], { cwd: r.dir, input: JSON.stringify({ ...fixture.sessionStart, cwd: r.main }), env: { FAKE_GH_DATA: r.ghData } });
+    assert.equal(res.code, 0);
+    assert.match(res.stdout, /removed 1 merged worktree\(s\) \(wt-cxss\)/);
+    assert.equal(fs.existsSync(wt), false);
+  });
+
   test('--hook session-start acts and is silent when nothing to remove', async () => {
     const r = await makeRepo();
     let res = await janitor(['--hook', 'session-start'], { cwd: r.main, input: '', env: { FAKE_GH_DATA: r.ghData } });

@@ -23,7 +23,9 @@ const GH_TIMEOUT_MS = 10_000;
 const LINK_SCAN_DEPTH = 6;
 const FIRST_PARENT_CAP = 50_000;
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop', 'trunk']);
-const PR_MERGE_RE = /\bgh\s+pr\s+merge\b/;
+// `gh pr merge`, also as `gh.exe` (Windows) and anywhere inside a wrapper
+// such as `bash -lc "gh pr merge 5"` or `powershell.exe -Command '...'`.
+const PR_MERGE_RE = /\bgh(?:\.exe)?\s+pr\s+merge\b/i;
 
 // Claude Code lock reasons. Claude Code locks the worktrees it creates for
 // sessions (`claude --worktree`, EnterWorktree) and for isolated subagents with
@@ -82,7 +84,7 @@ const HELP = `worktree-janitor: remove git worktrees and local branches already 
   --base <branch>    base branch (default: origin/HEAD target, else origin/main,
                      origin/master, main, master)
   --json             machine-readable report
-  --hook <kind>      Claude Code hook mode (implies --apply, quiet, always exits 0)
+  --hook <kind>      Claude Code / Codex hook mode (implies --apply, quiet, always exits 0)
   --include-locked   also remove worktrees locked by a live or unknown owner
 `;
 
@@ -711,6 +713,23 @@ function hookSummary(report) {
 // which decodes to U+FEFF and makes JSON.parse throw.
 const stripBom = (s) => s.replace(/^﻿/, '');
 
+// The shell command a PostToolUse payload ran, as one string ('' if none).
+// Claude Code (Bash, PowerShell) and Codex CLI (tool_name "Bash", also on
+// Windows) send tool_input.command as a string: the command exactly as the
+// model wrote it, without the powershell/bash wrapper Codex runs it in. An
+// argv array (["bash", "-lc", "gh pr merge 5"]) is accepted too and joined
+// with spaces; PR_MERGE_RE is unanchored, so a merge inside a wrapper still
+// matches. Never throws, whatever the shape.
+function hookCommandText(payload) {
+  const input = payload && payload.tool_input;
+  if (typeof input === 'string') return input;
+  if (!input || typeof input !== 'object') return '';
+  const cmd = input.command !== undefined ? input.command : input.cmd;
+  if (typeof cmd === 'string') return cmd;
+  if (Array.isArray(cmd)) return cmd.filter((x) => typeof x === 'string').join(' ');
+  return '';
+}
+
 function readStdin(ms) {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) return resolve('');
@@ -777,10 +796,8 @@ async function main(argv) {
     } catch {
       payload = null;
     }
-    if (opts.hook === 'post-tool-use') {
-      const cmd = payload && payload.tool_input && payload.tool_input.command;
-      if (typeof cmd !== 'string' || !PR_MERGE_RE.test(cmd)) return 0;
-    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) payload = null;
+    if (opts.hook === 'post-tool-use' && !PR_MERGE_RE.test(hookCommandText(payload))) return 0;
     if (payload && typeof payload.cwd === 'string' && payload.cwd) hookCwd = payload.cwd;
   }
 
