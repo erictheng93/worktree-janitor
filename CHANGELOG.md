@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
-- The Claude Code and Codex plugins are installed from the `stable` branch, which the release workflow moves to each release tag. Machines update with `claude plugin marketplace update` + `claude plugin update`, or `codex plugin marketplace upgrade`, and never pick up unreleased commits from `main`. Pinning to a tag still works.
+- The Claude Code and Codex plugins are installed from the `stable` branch, which the release workflow moves to each release tag once the published release has installed cleanly (prereleases never move it). Machines update with `claude plugin marketplace update` + `claude plugin update`, or `codex plugin marketplace upgrade`, and never pick up unreleased commits from `main`. Pinning to a tag still works.
 - The Claude Code install commands use the HTTPS URL: the `owner/repo` shorthand is cloned over SSH and fails without a GitHub SSH key.
 
 ### Fixed
