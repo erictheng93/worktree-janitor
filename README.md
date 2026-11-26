@@ -18,7 +18,7 @@ Pick the line that describes you. Every block installs release `v0.1.0`.
 **You use Claude Code** (CLI or desktop app): install the plugin from the GitHub marketplace, pinned to the release tag.
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -89,11 +89,11 @@ Homebrew installs Node.js for you as a dependency. `install.sh` also needs `curl
 Terminal (Claude Code CLI):
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-`owner/repo#v0.1.0` is accepted as well. Claude Code 2.1.292 and newer also take the one-step form `claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.1.0`. The plugin is installed at user scope, so it applies to every project. Nothing prompts.
+The shorthand `erictheng93/worktree-janitor@v0.1.0` works too, but Claude Code clones it over SSH, so it needs a GitHub SSH key; the HTTPS URL above does not. Claude Code 2.1.292 and newer also take the one-step form `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`. The plugin is installed at user scope, so it applies to every project. Nothing prompts.
 
 Desktop app: run the same two commands in a terminal; the app reads the same `~/.claude` configuration. Restart the app afterwards. The hooks start `node` by name, so it must be on the `PATH` the app itself sees. An app started from the Dock or the Start menu may not inherit your shell's `PATH`; if the hooks do not run there, install Node.js system-wide (for example the nodejs.org installer or `winget`), or start the app from a terminal.
 
@@ -101,7 +101,7 @@ Desktop app: run the same two commands in a terminal; the app reads the same `~/
 - **Update:** `claude plugin marketplace update` keeps the pinned tag, so move the pin, then restart:
   ```
   claude plugin marketplace remove worktree-janitor-marketplace
-  claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.2.0
+  claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
   ```
 - **Uninstall:**
   ```

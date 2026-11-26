@@ -115,12 +115,12 @@ Use **one channel per tool**:
 Claude Code's CLI and desktop app share `~/.claude`, so installing from a terminal makes the plugin available in both. Restart running sessions or the app afterwards.
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-- The marketplace source can also be written `erictheng93/worktree-janitor#v0.1.0`, as the URL `https://github.com/erictheng93/worktree-janitor`, or as the path of a local directory. Without `@<tag>` it follows the default branch, which is not a release.
-- One-step form, Claude Code 2.1.292 and newer: `claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.1.0`.
+- The marketplace source can also be written as the shorthand `erictheng93/worktree-janitor@v0.1.0` (Claude Code clones it over SSH, so it needs a GitHub SSH key), or as the path of a local directory. Without `#<tag>` it follows the default branch, which is not a release.
+- One-step form, Claude Code 2.1.292 and newer: `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`.
 - In an interactive Claude Code session the same commands are available as `/plugin marketplace add ...` and `/plugin install ...`.
 - The default scope is `user`, which applies to every project. Nothing prompts: the plugin has no `userConfig`.
 
@@ -140,7 +140,7 @@ The hooks use exec form (`"command": "node"` plus an `args` array), so no shell 
 
 ```
 claude plugin marketplace remove worktree-janitor-marketplace
-claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.2.0
+claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
 ```
 
 On a Claude Code without the one-step form, re-add the marketplace with the new tag and run `claude plugin install worktree-janitor@worktree-janitor-marketplace`. Restart sessions after updating. An unpinned marketplace updates with `claude plugin marketplace update worktree-janitor-marketplace` and `claude plugin update worktree-janitor@worktree-janitor-marketplace`.

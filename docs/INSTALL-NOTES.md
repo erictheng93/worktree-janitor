@@ -46,12 +46,13 @@ terminal makes the plugin available in both (restart the app).
 
 - Install (pinned to a tag):
   ```
-  claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+  claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
   claude plugin install worktree-janitor@worktree-janitor-marketplace
   ```
   One-step form (Claude Code 2.1.292+):
-  `claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.1.0`.
-  `owner/repo#v0.1.0` is accepted too. Nothing prompts; the plugin has no
+  `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`.
+  The shorthand `owner/repo@v0.1.0` (or `#v0.1.0`) is cloned over SSH and
+  fails without a GitHub SSH key; the HTTPS URL works anywhere. Nothing prompts; the plugin has no
   `userConfig`.
 - Verify: `claude plugin list` shows `worktree-janitor@worktree-janitor-marketplace`
   with version `0.1.0`; in a session, `/worktree-janitor:clean-worktrees`
@@ -61,7 +62,7 @@ terminal makes the plugin available in both (restart the app).
   ref, so move the pin:
   ```
   claude plugin marketplace remove worktree-janitor-marketplace
-  claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.2.0
+  claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
   ```
   Claude Code only updates a plugin when its `version` changes, so every
   release must bump `.claude-plugin/plugin.json` (the release workflow

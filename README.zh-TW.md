@@ -18,7 +18,7 @@
 **你使用 Claude Code**（CLI 或桌面版 App）：從 GitHub marketplace 安裝外掛，並固定在發行版標籤。
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -89,11 +89,11 @@ Homebrew 會自動把 Node.js 當成相依套件安裝。`install.sh` 另外需�
 終端機（Claude Code CLI）：
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-也接受 `owner/repo#v0.1.0` 的寫法。Claude Code 2.1.292 以上還能用一行完成：`claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.1.0`。外掛安裝在使用者層級（user scope），對所有專案生效，過程中不會詢問任何問題。
+也可以用簡寫 `erictheng93/worktree-janitor@v0.1.0`，但 Claude Code 會用 SSH clone，機器上必須有 GitHub 的 SSH key；上面的 HTTPS 網址沒有這個限制。Claude Code 2.1.292 以上還能用一行完成：`claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`。外掛安裝在使用者層級（user scope），對所有專案生效，過程中不會詢問任何問題。
 
 桌面版 App：在終端機執行上面兩行指令即可，App 讀取的是同一份 `~/.claude` 設定，裝完重新啟動 App。hook 直接以名稱呼叫 `node`，所以 App 本身看得到的 `PATH` 裡必須有 node。從 Dock 或「開始」功能表啟動的 App 不一定會繼承 shell 的 `PATH`；如果 hook 在 App 裡沒有執行，請把 Node.js 安裝成全系統可用（例如 nodejs.org 的安裝程式或 `winget`），或從終端機啟動 App。
 
@@ -101,7 +101,7 @@ claude plugin install worktree-janitor@worktree-janitor-marketplace
 - **更新：** `claude plugin marketplace update` 會停留在原本固定的標籤，所以要改掉固定的標籤，然後重新啟動：
   ```
   claude plugin marketplace remove worktree-janitor-marketplace
-  claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.2.0
+  claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
   ```
 - **解除安裝：**
   ```

@@ -115,12 +115,12 @@ git worktree 是附加在同一個儲存庫上的額外工作目錄（`git workt
 Claude Code 的 CLI 與桌面版 App 共用 `~/.claude`，所以在終端機安裝後兩者都能使用。安裝後請重新啟動執行中的工作階段或 App。
 
 ```
-claude plugin marketplace add erictheng93/worktree-janitor@v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-- marketplace 來源也可以寫成 `erictheng93/worktree-janitor#v0.1.0`、網址 `https://github.com/erictheng93/worktree-janitor`，或本機資料夾的路徑。沒有 `@<標籤>` 時會跟著預設分支走，那不是正式發行版。
-- 一步完成的寫法（Claude Code 2.1.292 以上）：`claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.1.0`。
+- marketplace 來源也可以寫成簡寫 `erictheng93/worktree-janitor@v0.1.0`（Claude Code 會用 SSH clone，需要 GitHub 的 SSH key），或本機資料夾的路徑。沒有 `#<標籤>` 時會跟著預設分支走，那不是正式發行版。
+- 一步完成的寫法（Claude Code 2.1.292 以上）：`claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`。
 - 在互動式 Claude Code 工作階段中，同樣的指令可寫成 `/plugin marketplace add ...` 與 `/plugin install ...`。
 - 預設範圍為 `user`，對所有專案生效。過程中不會詢問任何問題：外掛沒有 `userConfig`。
 
@@ -140,7 +140,7 @@ hook 使用 exec 形式（`"command": "node"` 加上 `args` 陣列），不經�
 
 ```
 claude plugin marketplace remove worktree-janitor-marketplace
-claude plugin install worktree-janitor --marketplace erictheng93/worktree-janitor@v0.2.0
+claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
 ```
 
 如果你的 Claude Code 沒有一步完成的寫法，就用新標籤重新加入 marketplace，再執行 `claude plugin install worktree-janitor@worktree-janitor-marketplace`。更新後請重新啟動工作階段。沒有固定標籤的 marketplace 則用 `claude plugin marketplace update worktree-janitor-marketplace` 與 `claude plugin update worktree-janitor@worktree-janitor-marketplace` 更新。

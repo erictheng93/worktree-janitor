@@ -187,7 +187,7 @@ jobs:
           # Works with node off PATH (absolute opt node in the wrapper).
           env PATH=/usr/bin:/bin "$(command -v worktree-janitor)" --help >/dev/null
           brew info local/wjtest/worktree-janitor | tee info.txt
-          grep -q 'claude plugin marketplace add erictheng93/worktree-janitor@v' info.txt
+          grep -q 'claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#' info.txt
       - name: Codex hooks for the Homebrew copy (throwaway CODEX_HOME) survive a reinstall
         run: |
           set -eu
