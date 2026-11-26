@@ -2,7 +2,7 @@ class WorktreeJanitor < Formula
   desc "Remove git worktrees and local branches whose work is already merged"
   homepage "https://github.com/erictheng93/worktree-janitor"
   url "https://github.com/erictheng93/worktree-janitor/releases/download/v0.1.0/worktree-janitor-v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "b282c575a6d4f5584c85d7520ecd0832e3691946b73cf676c4e6623bbd84a153"
   license "MIT"
 
   depends_on "node"
