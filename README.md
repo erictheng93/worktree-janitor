@@ -13,21 +13,21 @@ Removes git worktrees and local branches whose work is already merged, without e
 
 ### Recommended
 
-Pick the line that describes you. Every block installs release `v0.1.0`.
+Pick the line that describes you. Every block installs the latest release. The plugins follow the `stable` branch, which the release workflow moves to each new release tag and nothing else, so they never pick up unreleased work from `main`.
 
-**You use Claude Code** (CLI or desktop app): install the plugin from the GitHub marketplace, pinned to the release tag.
+**You use Claude Code** (CLI or desktop app): install the plugin from the GitHub marketplace, on the `stable` branch.
 
 ```
-claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
 Restart Claude Code. The CLI and the desktop app share the same configuration, so this covers both.
 
-**You use Codex** (CLI or desktop app): install the plugin pinned with `--ref`, then trust its hooks.
+**You use Codex** (CLI or desktop app): install the plugin on the `stable` branch with `--ref`, then trust its hooks.
 
 ```
-codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
+codex plugin marketplace add erictheng93/worktree-janitor --ref stable
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -53,7 +53,7 @@ Windows, in PowerShell (Windows PowerShell 5.1 or PowerShell 7):
 
 Open a new terminal, then run `worktree-janitor --help`.
 
-**Why these.** Each one installs a fixed release: the plugins are pinned to the tag, the PowerShell installer downloads that release's archive and refuses it unless its SHA-256 matches the published `SHA256SUMS`, and Homebrew checks the formula's sha256. None needs sudo or administrator rights, and each has a one-command update path (below). The plugins also ship the hooks and the `/worktree-janitor:clean-worktrees` command (Claude Code) or `$clean-worktrees` skill (Codex), so there are no local files to look after.
+**Why these.** Each one installs a fixed release: the plugins follow `stable`, which only ever points at a release tag, the PowerShell installer downloads that release's archive and refuses it unless its SHA-256 matches the published `SHA256SUMS`, and Homebrew checks the formula's sha256. None needs sudo or administrator rights, and each has a one-command update path (below). The plugins also ship the hooks and the `/worktree-janitor:clean-worktrees` command (Claude Code) or `$clean-worktrees` skill (Codex), so there are no local files to look after.
 
 **Use one channel per tool.** For Codex in particular, never combine the plugin with hooks from an installer (`install.sh --codex`, `install.ps1 -Codex`, `install.mjs --codex`): both register the same two hooks, so every hook would run twice. The installers warn when they find the plugin enabled, and leave a Claude Code plugin from another channel alone.
 
@@ -76,8 +76,8 @@ Homebrew installs Node.js for you as a dependency. `install.sh` also needs `curl
 
 | Channel | For | Updates | Section |
 | --- | --- | --- | --- |
-| Claude Code plugin | Claude Code CLI and desktop app | move the pinned tag | [Claude Code](#claude-code-plugin) |
-| Codex plugin | Codex CLI and desktop app | move the pinned tag, re-trust hooks | [Codex](#codex-plugin) |
+| Claude Code plugin | Claude Code CLI and desktop app | `marketplace update` + `plugin update` | [Claude Code](#claude-code-plugin) |
+| Codex plugin | Codex CLI and desktop app | `marketplace upgrade`, re-trust hooks | [Codex](#codex-plugin) |
 | `install.ps1` | Windows (command, optional hooks) | run it again | [PowerShell](#windows-powershell-installps1) |
 | Homebrew | macOS, Linux (command) | `brew upgrade` | [Homebrew](#homebrew-macos-linux) |
 | `install.sh` | macOS, Linux (command, optional hooks) | run it again | [curl](#macos-linux-curl-installsh) |
@@ -89,20 +89,21 @@ Homebrew installs Node.js for you as a dependency. `install.sh` also needs `curl
 Terminal (Claude Code CLI):
 
 ```
-claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-The shorthand `erictheng93/worktree-janitor@v0.1.0` works too, but Claude Code clones it over SSH, so it needs a GitHub SSH key; the HTTPS URL above does not. Claude Code 2.1.292 and newer also take the one-step form `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`. The plugin is installed at user scope, so it applies to every project. Nothing prompts.
+The shorthand `erictheng93/worktree-janitor@stable` works too, but Claude Code clones it over SSH, so it needs a GitHub SSH key; the HTTPS URL above does not. Claude Code 2.1.292 and newer also take the one-step form `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#stable`. The plugin is installed at user scope, so it applies to every project. Nothing prompts.
 
 Desktop app: run the same two commands in a terminal; the app reads the same `~/.claude` configuration. Restart the app afterwards. The hooks start `node` by name, so it must be on the `PATH` the app itself sees. An app started from the Dock or the Start menu may not inherit your shell's `PATH`; if the hooks do not run there, install Node.js system-wide (for example the nodejs.org installer or `winget`), or start the app from a terminal.
 
 - **Verify:** `claude plugin list` shows `worktree-janitor@worktree-janitor-marketplace` at version `0.1.0`, and `/worktree-janitor:clean-worktrees` is available in a session.
-- **Update:** `claude plugin marketplace update` keeps the pinned tag, so move the pin, then restart:
+- **Update:** fetch the newest release from `stable`, then restart Claude Code:
   ```
-  claude plugin marketplace remove worktree-janitor-marketplace
-  claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
+  claude plugin marketplace update worktree-janitor-marketplace
+  claude plugin update worktree-janitor@worktree-janitor-marketplace
   ```
+  To stay on one exact release instead, add the marketplace with `#v0.1.0` in place of `#stable`. A tag never moves, so updating then means `claude plugin marketplace remove worktree-janitor-marketplace` and adding it again with the new tag.
 - **Uninstall:**
   ```
   claude plugin uninstall worktree-janitor@worktree-janitor-marketplace
@@ -114,26 +115,25 @@ Desktop app: run the same two commands in a terminal; the app reads the same `~/
 Terminal (Codex CLI):
 
 ```
-codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
+codex plugin marketplace add erictheng93/worktree-janitor --ref stable
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
-(`erictheng93/worktree-janitor@v0.1.0` works too.) Then start `codex` and trust the SessionStart and PostToolUse hooks of worktree-janitor in `/hooks`, or at the startup prompt. `codex exec` skips untrusted hooks silently.
+(`erictheng93/worktree-janitor@stable` works too.) Then start `codex` and trust the SessionStart and PostToolUse hooks of worktree-janitor in `/hooks`, or at the startup prompt. `codex exec` skips untrusted hooks silently.
 
 Desktop app: run the same commands in a terminal (the app shares `CODEX_HOME`, default `~/.codex`), then trust the hooks in Settings > Hooks.
 
 The plugin's hooks do not need `node` on `PATH`: they also look in `/opt/homebrew/bin`, `/usr/local/bin`, Volta and fnm's default alias on macOS/Linux, and `%ProgramFiles%\nodejs` on Windows. nvm, asdf, mise and `n` installs are found only through `PATH`.
 
 - **Verify:** `codex plugin list` shows `worktree-janitor@worktree-janitor-marketplace` enabled at version `0.1.0`; `/hooks` lists its two hooks; the skill is `$clean-worktrees` (explicit invocation only).
-- **Update:** adding the marketplace again with another `--ref` fails ("already added from a different source"), so remove and re-add it:
+- **Update:** `codex plugin marketplace upgrade worktree-janitor-marketplace` fetches the newest release from `stable` and updates the installed plugin.
+  **Trust the hooks again after every update.** Codex hashes all of a plugin's files for hook trust, so any new version shows up as untrusted.
+  To stay on one exact release, use `--ref v0.1.0`. Adding the marketplace again with another `--ref` fails ("already added from a different source"), so moving that pin means removing the plugin and the marketplace (the uninstall commands below) and adding them again.
+- **Uninstall:**
   ```
   codex plugin remove worktree-janitor@worktree-janitor-marketplace
   codex plugin marketplace remove worktree-janitor-marketplace
-  codex plugin marketplace add erictheng93/worktree-janitor --ref v0.2.0
-  codex plugin add worktree-janitor@worktree-janitor-marketplace
   ```
-  **Trust the hooks again after every update.** Codex hashes all of a plugin's files for hook trust, so any new version shows up as untrusted.
-- **Uninstall:** the first two commands of the update.
 
 #### Windows: PowerShell (install.ps1)
 

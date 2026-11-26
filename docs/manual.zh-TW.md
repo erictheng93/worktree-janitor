@@ -92,8 +92,8 @@ git worktree 是附加在同一個儲存庫上的額外工作目錄（`git workt
 
 | 你使用 | 推薦 | 原因 |
 | --- | --- | --- |
-| Claude Code（CLI 或桌面版 App） | 從 GitHub marketplace 安裝 [Claude Code 外掛](#claude-code-外掛)，固定在標籤上 | 不需要管理本機檔案；外掛內含 hook 與 `/worktree-janitor:clean-worktrees` |
-| Codex（CLI 或桌面版 App） | 從 GitHub marketplace 安裝 [Codex 外掛](#codex-外掛)，以 `--ref` 固定版本，再信任它的 hook | 同上，適用 Codex；外掛的 hook 不靠 `PATH` 也找得到 `node` |
+| Claude Code（CLI 或桌面版 App） | 從 GitHub marketplace 安裝 [Claude Code 外掛](#claude-code-外掛)，使用 `stable` 分支 | 不需要管理本機檔案；外掛內含 hook 與 `/worktree-janitor:clean-worktrees` |
+| Codex（CLI 或桌面版 App） | 從 GitHub marketplace 安裝 [Codex 外掛](#codex-外掛)，使用 `--ref stable`，再信任它的 hook | 同上，適用 Codex；外掛的 hook 不靠 `PATH` 也找得到 `node` |
 | 兩者都沒用，macOS 或 Linux | [Homebrew](#homebrew) | 用 `brew upgrade` 更新；Node.js 會一併安裝 |
 | 兩者都沒用，Windows | [install.ps1](#installps1windows) | 不需要系統管理員權限；把 `worktree-janitor` 加到使用者 `PATH` |
 | 想給腳本用一份經過驗證的副本，或兩個代理程式共用一份 | [install.sh](#installshmacoslinux) / [install.ps1](#installps1windows) 搭配 `--claude --codex` / `-Claude -Codex` | 發行版壓縮檔經過 SHA-256 驗證；升級後 hook 路徑不變 |
@@ -115,12 +115,12 @@ git worktree 是附加在同一個儲存庫上的額外工作目錄（`git workt
 Claude Code 的 CLI 與桌面版 App 共用 `~/.claude`，所以在終端機安裝後兩者都能使用。安裝後請重新啟動執行中的工作階段或 App。
 
 ```
-claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-- marketplace 來源也可以寫成簡寫 `erictheng93/worktree-janitor@v0.1.0`（Claude Code 會用 SSH clone，需要 GitHub 的 SSH key），或本機資料夾的路徑。沒有 `#<標籤>` 時會跟著預設分支走，那不是正式發行版。
-- 一步完成的寫法（Claude Code 2.1.292 以上）：`claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`。
+- marketplace 來源也可以寫成簡寫 `erictheng93/worktree-janitor@stable`（Claude Code 會用 SSH clone，需要 GitHub 的 SSH key），或本機資料夾的路徑。沒有 `#stable` 或 `#<標籤>` 時會跟著 `main` 走，那不是正式發行版。
+- 一步完成的寫法（Claude Code 2.1.292 以上）：`claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#stable`。
 - 在互動式 Claude Code 工作階段中，同樣的指令可寫成 `/plugin marketplace add ...` 與 `/plugin install ...`。
 - 預設範圍為 `user`，對所有專案生效。過程中不會詢問任何問題：外掛沒有 `userConfig`。
 
@@ -136,14 +136,16 @@ hook 使用 exec 形式（`"command": "node"` 加上 `args` 陣列），不經�
 
 **確認：** `claude plugin list` 會列出 `worktree-janitor@worktree-janitor-marketplace`，版本 `0.1.0`；工作階段中有 `/worktree-janitor:clean-worktrees`；`claude --debug-file <檔案>` 的紀錄中有 `SessionStart:startup [node .../scripts/janitor.mjs --hook session-start] ... finished with status 0`。
 
-**更新：** `claude plugin marketplace update` 會停在原本固定的標籤，而且 Claude Code 只在外掛版本號改變時才更新，所以要改掉固定的標籤：
+**更新：** marketplace 跟著 `stable` 分支走，發行流程會把它移到每個新的發行版標籤（絕不會移到 `main` 上尚未發行的 commit）。取得更新並更新外掛，然後重新啟動工作階段：
 
 ```
-claude plugin marketplace remove worktree-janitor-marketplace
-claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
+claude plugin marketplace update worktree-janitor-marketplace
+claude plugin update worktree-janitor@worktree-janitor-marketplace
 ```
 
-如果你的 Claude Code 沒有一步完成的寫法，就用新標籤重新加入 marketplace，再執行 `claude plugin install worktree-janitor@worktree-janitor-marketplace`。更新後請重新啟動工作階段。沒有固定標籤的 marketplace 則用 `claude plugin marketplace update worktree-janitor-marketplace` 與 `claude plugin update worktree-janitor@worktree-janitor-marketplace` 更新。
+Claude Code 只在外掛的 `version` 改變時才更新；每個發行版都會調高它（標籤與 manifest 不符時，發行流程會拒絕）。
+
+如果想固定在某一個發行版，加入 marketplace 時用 `#v0.1.0` 取代 `#stable`。標籤不會移動，所以要更新時先 `claude plugin marketplace remove worktree-janitor-marketplace`，再用新標籤重新加入，並執行 `claude plugin install worktree-janitor@worktree-janitor-marketplace`。
 
 **解除安裝：**
 
@@ -157,7 +159,7 @@ claude plugin marketplace remove worktree-janitor-marketplace
 Codex CLI 與桌面版 App 共用 `CODEX_HOME`（預設 `~/.codex`），所以在終端機安裝後兩者都能使用。
 
 ```
-codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
+codex plugin marketplace add erictheng93/worktree-janitor --ref stable
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -175,18 +177,11 @@ codex plugin add worktree-janitor@worktree-janitor-marketplace
 
 **確認：** `codex plugin list` 會列出已啟用的 `worktree-janitor@worktree-janitor-marketplace`，版本 `0.1.0`；`/hooks` 會列出外掛的 SessionStart 與 PostToolUse（`Bash`）兩個 hook。
 
-**更新：** 用另一個 `--ref` 再次加入 marketplace 會失敗（「already added from a different source」），所以要移除後重新加入：
+**更新：** `codex plugin marketplace upgrade worktree-janitor-marketplace` 會從 `stable` 取得最新發行版，並更新已安裝的外掛。接著**重新信任 hook**：Codex 依已安裝外掛所有檔案的內容計算 hook 的信任狀態，所以每次更新都要重新核准。
 
-```
-codex plugin remove worktree-janitor@worktree-janitor-marketplace
-codex plugin marketplace remove worktree-janitor-marketplace
-codex plugin marketplace add erictheng93/worktree-janitor --ref v0.2.0
-codex plugin add worktree-janitor@worktree-janitor-marketplace
-```
+如果想固定在某一個發行版，改用 `--ref v0.1.0`。用另一個 `--ref` 再次加入 marketplace 會失敗（「already added from a different source」），所以換版本時要先執行下面兩行解除安裝指令，再重新加入 marketplace 與外掛。
 
-接著**重新信任 hook**。Codex 依已安裝外掛所有檔案的內容計算 hook 的信任狀態，所以每次更新都要重新核准。沒有固定版本的 marketplace 可用 `codex plugin marketplace upgrade worktree-janitor-marketplace` 更新。
-
-**解除安裝：** 上面更新步驟的前兩行。之後會留下一個空的 `$CODEX_HOME/plugins/cache/worktree-janitor-marketplace` 資料夾。
+**解除安裝：** 先 `codex plugin remove worktree-janitor@worktree-janitor-marketplace`，再 `codex plugin marketplace remove worktree-janitor-marketplace`。之後會留下一個空的 `$CODEX_HOME/plugins/cache/worktree-janitor-marketplace` 資料夾。
 
 ### install.ps1（Windows）
 

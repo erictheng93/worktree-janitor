@@ -13,21 +13,21 @@
 
 ### 推薦方式
 
-選擇符合你的情況即可。以下每段指令都會安裝 `v0.1.0` 版。
+選擇符合你的情況即可。以下每段指令都會安裝最新的發行版。外掛跟著 `stable` 分支走，發行流程只會把它移到新的發行版標籤，所以絕不會裝到 `main` 上尚未發行的程式。
 
-**你使用 Claude Code**（CLI 或桌面版 App）：從 GitHub marketplace 安裝外掛，並固定在發行版標籤。
+**你使用 Claude Code**（CLI 或桌面版 App）：從 GitHub marketplace 安裝外掛，使用 `stable` 分支。
 
 ```
-claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
 安裝後重新啟動 Claude Code。CLI 與桌面版 App 共用同一份設定，所以一次就涵蓋兩者。
 
-**你使用 Codex**（CLI 或桌面版 App）：用 `--ref` 固定版本安裝外掛，然後信任它的 hook。
+**你使用 Codex**（CLI 或桌面版 App）：用 `--ref stable` 安裝外掛，然後信任它的 hook。
 
 ```
-codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
+codex plugin marketplace add erictheng93/worktree-janitor --ref stable
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
@@ -53,7 +53,7 @@ Windows，在 PowerShell 中執行（Windows PowerShell 5.1 或 PowerShell 7 皆
 
 開一個新的終端機視窗，執行 `worktree-janitor --help` 確認。
 
-**為什麼推薦這幾種。** 每一種都安裝固定的發行版：外掛固定在標籤上；PowerShell 安裝程式下載該發行版的壓縮檔，SHA-256 與發布的 `SHA256SUMS` 不符就拒絕安裝；Homebrew 會檢查 formula 裡的 sha256。全部都不需要 sudo 或系統管理員權限，也都有一行指令就能完成的更新方式（見下文）。外掛還內含 hook 以及 `/worktree-janitor:clean-worktrees` 指令（Claude Code）或 `$clean-worktrees` skill（Codex），不必自己管理本機檔案。
+**為什麼推薦這幾種。** 每一種都安裝固定的發行版：外掛跟著只會指向發行版標籤的 `stable`；PowerShell 安裝程式下載該發行版的壓縮檔，SHA-256 與發布的 `SHA256SUMS` 不符就拒絕安裝；Homebrew 會檢查 formula 裡的 sha256。全部都不需要 sudo 或系統管理員權限，也都有一行指令就能完成的更新方式（見下文）。外掛還內含 hook 以及 `/worktree-janitor:clean-worktrees` 指令（Claude Code）或 `$clean-worktrees` skill（Codex），不必自己管理本機檔案。
 
 **每個工具只用一種安裝管道。** 尤其是 Codex：絕對不要把外掛和安裝程式寫入的 hook（`install.sh --codex`、`install.ps1 -Codex`、`install.mjs --codex`）同時使用，兩者會註冊相同的兩個 hook，每個 hook 都會執行兩次。安裝程式發現外掛已啟用時會發出警告；對於從其他管道安裝的 Claude Code 外掛，則一律不動。
 
@@ -89,20 +89,21 @@ Homebrew 會自動把 Node.js 當成相依套件安裝。`install.sh` 另外需�
 終端機（Claude Code CLI）：
 
 ```
-claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
+claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
 claude plugin install worktree-janitor@worktree-janitor-marketplace
 ```
 
-也可以用簡寫 `erictheng93/worktree-janitor@v0.1.0`，但 Claude Code 會用 SSH clone，機器上必須有 GitHub 的 SSH key；上面的 HTTPS 網址沒有這個限制。Claude Code 2.1.292 以上還能用一行完成：`claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`。外掛安裝在使用者層級（user scope），對所有專案生效，過程中不會詢問任何問題。
+也可以用簡寫 `erictheng93/worktree-janitor@stable`，但 Claude Code 會用 SSH clone，機器上必須有 GitHub 的 SSH key；上面的 HTTPS 網址沒有這個限制。Claude Code 2.1.292 以上還能用一行完成：`claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#stable`。外掛安裝在使用者層級（user scope），對所有專案生效，過程中不會詢問任何問題。
 
 桌面版 App：在終端機執行上面兩行指令即可，App 讀取的是同一份 `~/.claude` 設定，裝完重新啟動 App。hook 直接以名稱呼叫 `node`，所以 App 本身看得到的 `PATH` 裡必須有 node。從 Dock 或「開始」功能表啟動的 App 不一定會繼承 shell 的 `PATH`；如果 hook 在 App 裡沒有執行，請把 Node.js 安裝成全系統可用（例如 nodejs.org 的安裝程式或 `winget`），或從終端機啟動 App。
 
 - **確認：** `claude plugin list` 會列出 `worktree-janitor@worktree-janitor-marketplace`，版本 `0.1.0`；在工作階段中可以使用 `/worktree-janitor:clean-worktrees`。
-- **更新：** `claude plugin marketplace update` 會停留在原本固定的標籤，所以要改掉固定的標籤，然後重新啟動：
+- **更新：** 從 `stable` 取得最新發行版，然後重新啟動 Claude Code：
   ```
-  claude plugin marketplace remove worktree-janitor-marketplace
-  claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
+  claude plugin marketplace update worktree-janitor-marketplace
+  claude plugin update worktree-janitor@worktree-janitor-marketplace
   ```
+  如果想固定在某一個發行版，加入 marketplace 時把 `#stable` 換成 `#v0.1.0`。標籤不會移動，之後要更新就得先 `claude plugin marketplace remove worktree-janitor-marketplace`，再用新標籤重新加入。
 - **解除安裝：**
   ```
   claude plugin uninstall worktree-janitor@worktree-janitor-marketplace
@@ -114,26 +115,25 @@ claude plugin install worktree-janitor@worktree-janitor-marketplace
 終端機（Codex CLI）：
 
 ```
-codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
+codex plugin marketplace add erictheng93/worktree-janitor --ref stable
 codex plugin add worktree-janitor@worktree-janitor-marketplace
 ```
 
-（也可以寫成 `erictheng93/worktree-janitor@v0.1.0`。）接著啟動 `codex`，在 `/hooks` 或啟動時的提示中，信任 worktree-janitor 的 SessionStart 與 PostToolUse 兩個 hook。`codex exec` 會默默略過未受信任的 hook。
+（也可以寫成 `erictheng93/worktree-janitor@stable`。）接著啟動 `codex`，在 `/hooks` 或啟動時的提示中，信任 worktree-janitor 的 SessionStart 與 PostToolUse 兩個 hook。`codex exec` 會默默略過未受信任的 hook。
 
 桌面版 App：在終端機執行相同的指令（App 與 CLI 共用 `CODEX_HOME`，預設為 `~/.codex`），再到「Settings > Hooks」信任這兩個 hook。
 
 外掛的 hook 不需要 `node` 在 `PATH` 中：在 macOS/Linux 上還會到 `/opt/homebrew/bin`、`/usr/local/bin`、Volta 以及 fnm 的預設 alias 尋找，在 Windows 上會找 `%ProgramFiles%\nodejs`。nvm、asdf、mise 與 `n` 安裝的 node 只能透過 `PATH` 找到。
 
 - **確認：** `codex plugin list` 會列出已啟用的 `worktree-janitor@worktree-janitor-marketplace`，版本 `0.1.0`；`/hooks` 會列出它的兩個 hook；skill 是 `$clean-worktrees`（只能明確呼叫）。
-- **更新：** 用另一個 `--ref` 再次加入 marketplace 會失敗（「already added from a different source」），所以要先移除再重新加入：
+- **更新：** `codex plugin marketplace upgrade worktree-janitor-marketplace` 會從 `stable` 取得最新發行版，並更新已安裝的外掛。
+  **每次更新後都要重新信任 hook。** Codex 以外掛所有檔案的雜湊值判斷 hook 是否受信任，所以任何新版本都會顯示為未受信任。
+  如果想固定在某一個發行版，改用 `--ref v0.1.0`。用另一個 `--ref` 再次加入 marketplace 會失敗（「already added from a different source」），所以要換版本時，先移除外掛與 marketplace（下面的解除安裝指令）再重新加入。
+- **解除安裝：**
   ```
   codex plugin remove worktree-janitor@worktree-janitor-marketplace
   codex plugin marketplace remove worktree-janitor-marketplace
-  codex plugin marketplace add erictheng93/worktree-janitor --ref v0.2.0
-  codex plugin add worktree-janitor@worktree-janitor-marketplace
   ```
-  **每次更新後都要重新信任 hook。** Codex 以外掛所有檔案的雜湊值判斷 hook 是否受信任，所以任何新版本都會顯示為未受信任。
-- **解除安裝：** 執行上面更新步驟的前兩行。
 
 #### Windows：PowerShell（install.ps1）
 

@@ -11,8 +11,8 @@ directories; anything else is marked.
 
 | Audience | Recommended channel | Why |
 | --- | --- | --- |
-| Uses Claude Code (CLI or desktop app) | Claude Code plugin from the GitHub marketplace, pinned to a tag | No local files to manage; the plugin ships the hooks and `/worktree-janitor:clean-worktrees` |
-| Uses Codex (CLI or desktop app) | Codex plugin from the GitHub marketplace, pinned with `--ref`, then trust its hooks | Same, for Codex; plugin hooks find `node` without PATH |
+| Uses Claude Code (CLI or desktop app) | Claude Code plugin from the GitHub marketplace, on the `stable` branch | No local files to manage; the plugin ships the hooks and `/worktree-janitor:clean-worktrees` |
+| Uses Codex (CLI or desktop app) | Codex plugin from the GitHub marketplace with `--ref stable`, then trust its hooks | Same, for Codex; plugin hooks find `node` without PATH |
 | Uses neither, macOS or Linux | Homebrew | Updates with `brew upgrade`; node comes as a dependency |
 | Uses neither, Windows | `install.ps1` | No admin; puts `worktree-janitor` on the user PATH |
 | Wants one verified copy for scripts, or uses both CLIs from one copy | `install.sh` / `install.ps1` with `--claude --codex` | sha256-verified release archive; hook paths survive upgrades |
@@ -44,26 +44,27 @@ family). `install.ps1` needs nothing beyond Windows PowerShell 5.1.
 Claude Code's CLI and desktop app share `~/.claude`, so installing from a
 terminal makes the plugin available in both (restart the app).
 
-- Install (pinned to a tag):
+- Install (the `stable` branch, which the release workflow moves to each release tag):
   ```
-  claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v0.1.0
+  claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
   claude plugin install worktree-janitor@worktree-janitor-marketplace
   ```
   One-step form (Claude Code 2.1.292+):
-  `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.1.0`.
-  The shorthand `owner/repo@v0.1.0` (or `#v0.1.0`) is cloned over SSH and
+  `claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#stable`.
+  The shorthand `owner/repo@stable` (or `#stable`) is cloned over SSH and
   fails without a GitHub SSH key; the HTTPS URL works anywhere. Nothing prompts; the plugin has no
   `userConfig`.
 - Verify: `claude plugin list` shows `worktree-janitor@worktree-janitor-marketplace`
   with version `0.1.0`; in a session, `/worktree-janitor:clean-worktrees`
   exists; `claude --debug-file <file>` logs
   `Hooks: SessionStart:startup [node .../scripts/janitor.mjs --hook session-start] ... finished with status 0`.
-- Update to a new tag: `claude plugin marketplace update` stays on the pinned
-  ref, so move the pin:
+- Update (verified 2026-11-26 with a throwaway branch, 0.1.0 -> 0.1.1):
   ```
-  claude plugin marketplace remove worktree-janitor-marketplace
-  claude plugin install worktree-janitor --marketplace https://github.com/erictheng93/worktree-janitor.git#v0.2.0
+  claude plugin marketplace update worktree-janitor-marketplace
+  claude plugin update worktree-janitor@worktree-janitor-marketplace
   ```
+  Pinned to a tag (`#v0.1.0`) instead, `marketplace update` stays on it, so
+  remove the marketplace and add it again with the new tag.
   Claude Code only updates a plugin when its `version` changes, so every
   release must bump `.claude-plugin/plugin.json` (the release workflow
   refuses a tag that does not match the manifests). Restart sessions after
@@ -105,9 +106,9 @@ onboarding step. Tested with Claude Code 2.1.331 in a throwaway config dir.
 
 Codex CLI and the desktop app share `CODEX_HOME` (default `~/.codex`).
 
-- Install (pinned):
+- Install (`stable`):
   ```
-  codex plugin marketplace add erictheng93/worktree-janitor --ref v0.1.0
+  codex plugin marketplace add erictheng93/worktree-janitor --ref stable
   codex plugin add worktree-janitor@worktree-janitor-marketplace
   ```
   (`owner/repo@v0.1.0` also works.) Then trust the two hooks: CLI `/hooks`
@@ -117,19 +118,15 @@ Codex CLI and the desktop app share `CODEX_HOME` (default `~/.codex`).
   enabled with version `0.1.0`; `/hooks` lists a SessionStart and a
   PostToolUse (`Bash`) hook from the plugin; the skill is `$clean-worktrees`
   (explicit invocation only).
-- Update to a new tag: re-adding with another `--ref` fails ("already added
-  from a different source"), so:
-  ```
-  codex plugin remove worktree-janitor@worktree-janitor-marketplace
-  codex plugin marketplace remove worktree-janitor-marketplace
-  codex plugin marketplace add erictheng93/worktree-janitor --ref v0.2.0
-  codex plugin add worktree-janitor@worktree-janitor-marketplace
-  ```
-  then trust the hooks again: Codex hashes every file of an installed plugin
-  for hook trust, so any update needs a new approval. (Editing `ref` in
-  `config.toml` and running `codex plugin marketplace upgrade` should also
-  work; not tested.)
-- Uninstall: the first two commands above. An empty
+- Update: `codex plugin marketplace upgrade worktree-janitor-marketplace`
+  refreshes the snapshot and the installed plugin (verified 2026-11-26,
+  0.1.0 -> 0.1.1), then trust the hooks again: Codex hashes every file of an
+  installed plugin for hook trust, so any update needs a new approval.
+  Pinned to a tag (`--ref v0.1.0`) instead: re-adding with another `--ref`
+  fails ("already added from a different source"), so remove the plugin and
+  the marketplace and add them again.
+- Uninstall: `codex plugin remove worktree-janitor@worktree-janitor-marketplace`,
+  then `codex plugin marketplace remove worktree-janitor-marketplace`. An empty
   `$CODEX_HOME/plugins/cache/worktree-janitor-marketplace` directory is left.
 
 Plugin hook commands do not need `node` on PATH: on macOS/Linux they try

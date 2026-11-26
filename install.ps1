@@ -257,8 +257,19 @@ worktree-janitor installer (Windows)
   try {
     if (-not $Version) {
       $api = if ($env:WORKTREE_JANITOR_API_URL) { $env:WORKTREE_JANITOR_API_URL } else { "https://api.github.com/repos/$Repo/releases/latest" }
-      try { Get-File $api (Join-Path $tmp 'latest.json') } catch { Fail "could not look up the latest release of $Repo (none published yet, or no network). Pass -Version vX.Y.Z" }
-      $rel = Get-Content -LiteralPath (Join-Path $tmp 'latest.json') -Raw | ConvertFrom-Json
+      $rel = $null
+      try { Get-File $api (Join-Path $tmp 'latest.json'); $rel = Get-Content -LiteralPath (Join-Path $tmp 'latest.json') -Raw | ConvertFrom-Json } catch { }
+      if (-not $rel -and -not $env:WORKTREE_JANITOR_API_URL) {
+        # The API allows 60 unauthenticated requests an hour per IP. github.com/<repo>/releases/latest
+        # redirects to .../releases/tag/<tag> without that limit.
+        try {
+          $proxy = Get-ProxyArgs
+          $r = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -Method Head -UseBasicParsing -TimeoutSec 60 -Headers @{ 'User-Agent' = 'worktree-janitor-installer' } @proxy
+          $final = if ($r.BaseResponse.ResponseUri) { $r.BaseResponse.ResponseUri } else { $r.BaseResponse.RequestMessage.RequestUri }
+          if ([string]$final -match '/releases/tag/([^/?#]+)$') { $rel = [pscustomobject]@{ tag_name = $Matches[1] } }
+        } catch { }
+      }
+      if (-not $rel) { Fail "could not look up the latest release of $Repo (none published yet, or no network). Pass -Version vX.Y.Z" }
       if (-not ($rel.PSObject.Properties.Name -contains 'tag_name') -or -not $rel.tag_name) { Fail 'the latest-release response has no tag_name; pass -Version vX.Y.Z' }
       $Version = [string]$rel.tag_name
     }

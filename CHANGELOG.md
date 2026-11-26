@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The Claude Code and Codex plugins are installed from the `stable` branch, which the release workflow moves to each release tag. Machines update with `claude plugin marketplace update` + `claude plugin update`, or `codex plugin marketplace upgrade`, and never pick up unreleased commits from `main`. Pinning to a tag still works.
+- The Claude Code install commands use the HTTPS URL: the `owner/repo` shorthand is cloned over SSH and fails without a GitHub SSH key.
+
+### Fixed
+
+- `install.sh` and `install.ps1` fall back to the `github.com/<repo>/releases/latest` redirect when the GitHub API refuses the latest-release lookup (60 unauthenticated requests an hour per IP, easily used up behind a shared NAT or on CI runners).
+
 ## [0.1.0] - 2026-11-24
 
 First release. worktree-janitor removes git worktrees and local branches whose work is already merged, without ever deleting through a link or into a mount. It runs automatically as a Claude Code or Codex plugin, or by hand as the `worktree-janitor` command. Installation for every channel: [README](https://github.com/erictheng93/worktree-janitor#installation).

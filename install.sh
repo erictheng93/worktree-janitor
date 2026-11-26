@@ -220,14 +220,30 @@ wj_install() {
   return $wj_rc
 }
 
+# github.com/<repo>/releases/latest redirects to .../releases/tag/<tag>.
+wj_latest_by_redirect() {
+  wj_u=https://github.com/$wj_repo/releases/latest
+  if command -v curl >/dev/null 2>&1; then
+    wj_u=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 -o /dev/null -w '%{url_effective}' "$wj_u") || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wj_u=$(wget -q -S --max-redirect=0 -O /dev/null "$wj_u" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tr -d '\r' | head -n 1)
+  else
+    return 1
+  fi
+  case $wj_u in */releases/tag/?*) printf '%s\n' "${wj_u##*/}" ;; *) return 1 ;; esac
+}
+
 wj_install_in_tmp() {
   if [ -z "$wj_version" ]; then
     wj_api=${WORKTREE_JANITOR_API_URL:-https://api.github.com/repos/$wj_repo/releases/latest}
-    if ! wj_fetch "$wj_api" "$wj_tmp/latest.json"; then
+    if wj_fetch "$wj_api" "$wj_tmp/latest.json"; then
+      wj_version=$(sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$wj_tmp/latest.json" | head -n 1)
+    elif [ -z "${WORKTREE_JANITOR_API_URL:-}" ] && wj_version=$(wj_latest_by_redirect) && [ -n "$wj_version" ]; then
+      : # the API allows 60 unauthenticated requests an hour per IP; github.com has no such limit
+    else
       wj_err "could not look up the latest release of $wj_repo (none published yet, or no network). Pass --version vX.Y.Z"
       return 1
     fi
-    wj_version=$(sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$wj_tmp/latest.json" | head -n 1)
     if [ -z "$wj_version" ]; then
       wj_err "the latest-release response has no tag_name; pass --version vX.Y.Z"
       return 1
