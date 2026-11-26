@@ -21,12 +21,12 @@ class WorktreeJanitor < Formula
       Claude Code or Codex settings; to run the janitor automatically, pick one:
 
         Claude Code plugin (CLI and desktop app):
-          claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#v#{version}
+          claude plugin marketplace add https://github.com/erictheng93/worktree-janitor.git#stable
           claude plugin install worktree-janitor@worktree-janitor-marketplace
 
         Codex plugin (CLI and desktop app), then trust its hooks in /hooks
         (CLI) or Settings > Hooks (app):
-          codex plugin marketplace add erictheng93/worktree-janitor --ref v#{version}
+          codex plugin marketplace add erictheng93/worktree-janitor --ref stable
           codex plugin add worktree-janitor@worktree-janitor-marketplace
 
         Codex hooks that run this Homebrew copy:
